@@ -5,6 +5,7 @@
     <Platform Name="x86" />
   </Configurations>
   <Project Path="AnimeStudio.CLI/AnimeStudio.CLI.csproj" />
+  <Project Path="AnimeStudio.AssetExplorer/AnimeStudio.AssetExplorer.csproj" />
   <Project Path="AnimeStudio.FBXNative/AnimeStudio.FBXNative.vcxproj" Id="11ea25a3-ed68-40ee-a9d0-7fde3b583027">
     <Build Project="false" />
   </Project>

@@ -12,12 +12,16 @@ namespace AnimeStudio.GUI
         ///  The main entry point for the application.
         /// </summary>
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
+            if (AnimeStudio.AssetExplorer.IndexWorker.TryRun(args)) return;
             Application.SetHighDpiMode(HighDpiMode.SystemAware);
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new MainForm());
+            var form = new MainForm();
+            if (args.Contains("--asset-explorer"))
+                form.Shown += (_, _) => form.OpenAssetExplorer();
+            Application.Run(form);
         }
     }
 }

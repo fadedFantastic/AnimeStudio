@@ -94,6 +94,7 @@ namespace AnimeStudio.GUI
         {
             Thread.CurrentThread.CurrentCulture = new CultureInfo("en-US");
             InitializeComponent();
+            InitializeAssetExplorer();
             ApplyTheme();
             Text = $"AnimeStudio v{System.Windows.Forms.Application.ProductVersion}";
             InitializeExportOptions();
@@ -387,7 +388,7 @@ namespace AnimeStudio.GUI
             {
                 await Task.Run(() => assetsManager.LoadFiles(paths));
             }
-            BuildAssetStructures();
+            await BuildAssetStructures();
         }
 
         private async void loadFile_Click(object sender, EventArgs e)
@@ -405,7 +406,7 @@ namespace AnimeStudio.GUI
                     paths = File.ReadAllLines(paths[0]);
                 }
                 await Task.Run(() => assetsManager.LoadFiles(paths));
-                BuildAssetStructures();
+                await BuildAssetStructures();
             }
         }
 
@@ -424,7 +425,7 @@ namespace AnimeStudio.GUI
                 assetsManager.SpecifyUnityVersion = specifyUnityVersion.Text;
                 assetsManager.Game = Studio.Game;
                 await Task.Run(() => assetsManager.LoadFolder(openFolderDialog.Folder));
-                BuildAssetStructures();
+                await BuildAssetStructures();
             }
         }
 
@@ -461,7 +462,7 @@ namespace AnimeStudio.GUI
             }
         }
 
-        private async void BuildAssetStructures()
+        private async Task BuildAssetStructures()
         {
             if (assetsManager.assetsFileList.Count == 0)
             {
