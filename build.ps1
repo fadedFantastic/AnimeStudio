@@ -1,5 +1,8 @@
+$ErrorActionPreference = 'Stop'
+
 # prepare patcher
 dotnet build AnimeStudio.Patcher -c Release -f net10.0
+if ($LASTEXITCODE -ne 0) { throw 'Failed to build the apphost patcher.' }
 $patcher = "AnimeStudio.Patcher\bin\Release\net10.0\AnimeStudio.Patcher.exe"
 
 foreach ($tfm in 'net9.0-windows', 'net10.0-windows') {
@@ -11,14 +14,11 @@ foreach ($tfm in 'net9.0-windows', 'net10.0-windows') {
     $guiOut = "AnimeStudio.GUI/bin/$configuration/$tfm"
     $cliOut = "AnimeStudio.CLI/bin/$configuration/$tfm"
 
-    $guiExe = "$guiOut/AnimeStudio.GUI.exe"
-    $cliExe = "$cliOut/AnimeStudio.CLI.exe"
-
-    # build cli and gui & patch them
+    # Keep the build outputs runnable with their DLLs in the same directory.
     dotnet build AnimeStudio.CLI -c $configuration -f $tfm
-    & $patcher $cliExe -d bin
+    if ($LASTEXITCODE -ne 0) { throw "Failed to build the CLI for $tfm." }
     dotnet build AnimeStudio.GUI -c $configuration -f $tfm
-    & $patcher $guiExe -d bin
+    if ($LASTEXITCODE -ne 0) { throw "Failed to build the GUI for $tfm." }
 
     # prepare output dir
     if (Test-Path $outputDir) { Remove-Item $outputDir -Recurse -Force }
@@ -32,6 +32,9 @@ foreach ($tfm in 'net9.0-windows', 'net10.0-windows') {
     # move files out
     foreach ($exe in 'AnimeStudio.GUI.exe', 'AnimeStudio.CLI.exe') {
         Move-Item "$outputDir/bin/$exe" $outputDir
+        # Only the distribution copy loads its DLL from the bin subdirectory.
+        & $patcher "$outputDir/$exe" -d bin
+        if ($LASTEXITCODE -ne 0) { throw "Failed to patch $exe for $tfm." }
     }
     Move-Item "$outputDir/bin/LICENSE" $outputDir
 }
