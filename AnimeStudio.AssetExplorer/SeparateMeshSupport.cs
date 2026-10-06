@@ -42,7 +42,7 @@ public static class SeparateMeshSupport
         manager.FilterData = new() { Items = combined.Offsets.ToList() };
         try
         {
-            using (token.Register(() => manager.tokenSource.Cancel())) manager.LoadFilesPreprocessed(combined.Files);
+            using (token.Register(() => manager.tokenSource.Cancel())) manager.LoadFiles(combined.Files, mergeSplitAssets: false);
             token.ThrowIfCancellationRequested();
             var resolved = extras.Select((asset, i) => (asset, combined.Selected[request.Assets.Length + i])).ToDictionary(x => x.asset, x => x.Item2);
             foreach (var binding in bindings)

@@ -1,4 +1,4 @@
-﻿
+
 using Newtonsoft.Json;
 using OpenTK.Graphics.OpenGL;
 using System;
@@ -115,18 +115,11 @@ namespace AnimeStudio.GUI
                 switch (currentTheme)
                 {
                     case (int)GuiColorTheme.System:
-                        System.Windows.Forms.Application.SetColorMode(SystemColorMode.System);
-                        if (System.Windows.Forms.Application.RenderWithVisualStyles)
+                        if (IsSystemInDarkMode())
                         {
-                            assetListView.GridLines = false;
-                            assetInfoLabel.ForeColor = System.Drawing.SystemColors.ControlText;
+                            goto case (int)GuiColorTheme.Dark;
                         }
-                        else
-                        {
-                            assetListView.GridLines = true;
-                            assetInfoLabel.ForeColor = System.Drawing.SystemColors.WindowText;
-                        }
-                        break;
+                        goto case (int)GuiColorTheme.Light;
                     case (int)GuiColorTheme.Dark:
                         System.Windows.Forms.Application.SetColorMode(SystemColorMode.Dark);
                         assetListView.GridLines = false;
@@ -145,6 +138,21 @@ namespace AnimeStudio.GUI
             }
 #pragma warning restore WFO5001
 #endif
+        }
+
+        private static bool IsSystemInDarkMode()
+        {
+            try
+            {
+                using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                    @"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+                return key?.GetValue("AppsUseLightTheme") is int useLight && useLight == 0;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warning($"Could not read the system app theme, assuming light : {ex.Message}");
+                return false;
+            }
         }
 
         private void specifyTheme_SelectedIndexChanged(object sender, EventArgs e)
@@ -264,7 +272,16 @@ namespace AnimeStudio.GUI
                 Studio.Game = GameManager.GetGame(Properties.Settings.Default.selectedGame);
             }
 
-            TypeFlags.SetTypes(JsonConvert.DeserializeObject<Dictionary<ClassIDType, (bool, bool)>>(Properties.Settings.Default.types));
+            try
+            {
+                TypeFlags.SetTypes(JsonConvert.DeserializeObject<Dictionary<ClassIDType, (bool, bool)>>(Properties.Settings.Default.types));
+            } catch (Newtonsoft.Json.JsonSerializationException)
+            {
+                // Fixes an issue where the application won't load if invalid settings from another version of Studio were previously saved.
+                Properties.Settings.Default.Reset();
+                TypeFlags.SetTypes(JsonConvert.DeserializeObject<Dictionary<ClassIDType, (bool, bool)>>(Properties.Settings.Default.types));
+            }
+
             Logger.Info($"Target Game is {Studio.Game.Type}");
 
             if (Studio.Game.IsUnityCN())
@@ -388,7 +405,7 @@ namespace AnimeStudio.GUI
             {
                 await Task.Run(() => assetsManager.LoadFiles(paths));
             }
-            await BuildAssetStructures();
+            await BuildAssetStructures(paths);
         }
 
         private async void loadFile_Click(object sender, EventArgs e)
@@ -406,7 +423,7 @@ namespace AnimeStudio.GUI
                     paths = File.ReadAllLines(paths[0]);
                 }
                 await Task.Run(() => assetsManager.LoadFiles(paths));
-                await BuildAssetStructures();
+                await BuildAssetStructures(paths);
             }
         }
 
@@ -425,7 +442,7 @@ namespace AnimeStudio.GUI
                 assetsManager.SpecifyUnityVersion = specifyUnityVersion.Text;
                 assetsManager.Game = Studio.Game;
                 await Task.Run(() => assetsManager.LoadFolder(openFolderDialog.Folder));
-                await BuildAssetStructures();
+                await BuildAssetStructures(openFolderDialog.Folder);
             }
         }
 
@@ -462,10 +479,20 @@ namespace AnimeStudio.GUI
             }
         }
 
-        private async Task BuildAssetStructures()
+        private async Task BuildAssetStructures(params string[] sourcePaths)
         {
             if (assetsManager.assetsFileList.Count == 0)
             {
+                if (Studio.Game?.Type == GameType.AFKJourney && AddAFKJourneySpecialAssets(sourcePaths) > 0)
+                {
+                    visibleAssets = exportableAssets;
+                    assetListView.VirtualListSize = visibleAssets.Count;
+                    PopulateTypeFilters();
+                    Text = $"AnimeStudio v{System.Windows.Forms.Application.ProductVersion} - AFK Journey loose assets";
+                    StatusStripUpdate($"Loaded {visibleAssets.Count} AFK Journey loose files for preview.");
+                    return;
+                }
+
                 StatusStripUpdate("No Unity file can be loaded.");
                 return;
             }
@@ -494,6 +521,12 @@ namespace AnimeStudio.GUI
 
             Text = $"AnimeStudio v{System.Windows.Forms.Application.ProductVersion} - {productName} - {assetsManager.assetsFileList[0].unityVersion} - {assetsManager.assetsFileList[0].m_TargetPlatform}";
 
+            if (Studio.Game?.Type == GameType.AFKJourney)
+            {
+                AddAFKJourneySpecialAssets(sourcePaths);
+                visibleAssets = exportableAssets;
+            }
+
             assetListView.VirtualListSize = visibleAssets.Count;
 
             sceneTreeView.BeginUpdate();
@@ -516,6 +549,69 @@ namespace AnimeStudio.GUI
             typeMap.Clear();
             classesListView.EndUpdate();
 
+            PopulateTypeFilters();
+            var log = $"Finished loading {assetsManager.assetsFileList.Count} files with {visibleAssets.Count} exportable assets";
+            var m_ObjectsCount = assetsManager.assetsFileList.Sum(x => x.m_Objects.Count);
+            var objectsCount = assetsManager.assetsFileList.Sum(x => x.Objects.Count);
+            if (m_ObjectsCount != objectsCount)
+            {
+                log += $" and {m_ObjectsCount - objectsCount} assets failed to read";
+            }
+            StatusStripUpdate(log);
+        }
+
+        private int AddAFKJourneySpecialAssets(IEnumerable<string> sourcePaths)
+        {
+            var added = 0;
+            var existing = new HashSet<string>(
+                exportableAssets.Where(asset => asset.IsVirtual && !string.IsNullOrEmpty(asset.ExternalPath)).Select(asset => asset.ExternalPath),
+                StringComparer.OrdinalIgnoreCase);
+            foreach (var (file, container) in EnumerateAFKJourneySpecialFiles(sourcePaths))
+            {
+                var type = Path.GetExtension(file).Equals(".jsone", StringComparison.OrdinalIgnoreCase)
+                    ? ClassIDType.TextAsset
+                    : ClassIDType.Texture2D;
+                if (!existing.Add(file))
+                {
+                    continue;
+                }
+
+                var item = new AssetItem(Path.GetFileName(file), type, file, new FileInfo(file).Length, container);
+                item.InfoText = $"Path: {file}";
+                item.SetSubItems();
+                exportableAssets.Add(item);
+                added++;
+            }
+
+            return added;
+        }
+
+        private static IEnumerable<(string File, string Container)> EnumerateAFKJourneySpecialFiles(IEnumerable<string> sourcePaths)
+        {
+            foreach (var sourcePath in sourcePaths.Where(path => !string.IsNullOrEmpty(path)).Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                if (Directory.Exists(sourcePath))
+                {
+                    var root = Path.GetFullPath(sourcePath);
+                    foreach (var file in Directory.GetFiles(sourcePath, "*.*", SearchOption.AllDirectories))
+                    {
+                        if (AFKJourneyUtils.IsPreviewableSpecialFile(file))
+                        {
+                            var directory = Path.GetDirectoryName(Path.GetFullPath(file)) ?? root;
+                            var container = Path.GetRelativePath(root, directory);
+                            yield return (file, container == "." ? string.Empty : container);
+                        }
+                    }
+                }
+                else if (File.Exists(sourcePath) && AFKJourneyUtils.IsPreviewableSpecialFile(sourcePath))
+                {
+                    yield return (sourcePath, string.Empty);
+                }
+            }
+        }
+
+        private void PopulateTypeFilters()
+        {
             var types = exportableAssets.Select(x => x.Type).Distinct().OrderBy(x => x.ToString()).ToArray();
             foreach (var type in types)
             {
@@ -530,14 +626,6 @@ namespace AnimeStudio.GUI
                 filterTypeToolStripMenuItem.DropDownItems.Add(typeItem);
             }
             allToolStripMenuItem.Checked = true;
-            var log = $"Finished loading {assetsManager.assetsFileList.Count} files with {assetListView.Items.Count} exportable assets";
-            var m_ObjectsCount = assetsManager.assetsFileList.Sum(x => x.m_Objects.Count);
-            var objectsCount = assetsManager.assetsFileList.Sum(x => x.Objects.Count);
-            if (m_ObjectsCount != objectsCount)
-            {
-                log += $" and {m_ObjectsCount - objectsCount} assets failed to read";
-            }
-            StatusStripUpdate(log);
         }
 
         private void typeToolStripMenuItem_Click(object sender, EventArgs e)
@@ -973,7 +1061,9 @@ namespace AnimeStudio.GUI
             {
                 if (tabControl2.SelectedIndex == 1)
                 {
-                    dumpTextBox.Text = DumpAsset(lastSelectedItem.Asset);
+                    dumpTextBox.Text = lastSelectedItem.IsVirtual
+                        ? lastSelectedItem.VirtualContent ?? lastSelectedItem.InfoText ?? lastSelectedItem.ExternalPath
+                        : DumpAsset(lastSelectedItem.Asset);
                 }
                 if (enablePreview.Checked)
                 {
@@ -1018,6 +1108,12 @@ namespace AnimeStudio.GUI
                 return;
             try
             {
+                if (assetItem.IsVirtual)
+                {
+                    PreviewVirtualAsset(assetItem);
+                    return;
+                }
+
                 switch (assetItem.Asset)
                 {
                     case GameObject m_GameObject when Properties.Settings.Default.enableModelPreview:
@@ -1078,6 +1174,43 @@ namespace AnimeStudio.GUI
             catch (Exception e)
             {
                 Logger.Error($"Preview {assetItem.Type}:{assetItem.Text} error\r\n{e.Message}\r\n{e.StackTrace}");
+            }
+        }
+
+        private void PreviewVirtualAsset(AssetItem assetItem)
+        {
+            switch (assetItem.Type)
+            {
+                case ClassIDType.Texture2D:
+                    var decoded = AFKJourneyUtils.DecodeDxtToBitmapData(assetItem.ExternalPath);
+                    FlipPixelsVertically(decoded.Pixels, decoded.Width, decoded.Height);
+                    assetItem.InfoText = $"Width: {decoded.Width}\nHeight: {decoded.Height}\nFormat: {decoded.Format}\nPath: {assetItem.ExternalPath}";
+                    PreviewTexture(new DirectBitmap(decoded.Pixels, decoded.Width, decoded.Height));
+                    StatusStripUpdate("AFK Journey loose DXT texture preview");
+                    break;
+                case ClassIDType.TextAsset:
+                    assetItem.VirtualContent ??= AFKJourneyUtils.DecryptJsoneToText(File.ReadAllBytes(assetItem.ExternalPath));
+                    assetItem.InfoText = $"Path: {assetItem.ExternalPath}";
+                    PreviewText(assetItem.VirtualContent);
+                    StatusStripUpdate("AFK Journey loose JSOne preview");
+                    break;
+                default:
+                    StatusStripUpdate("Unsupported AFK Journey loose asset preview.");
+                    break;
+            }
+        }
+
+        private static void FlipPixelsVertically(byte[] pixels, int width, int height)
+        {
+            var stride = width * 4;
+            var row = new byte[stride];
+            for (var y = 0; y < height / 2; y++)
+            {
+                var top = y * stride;
+                var bottom = (height - y - 1) * stride;
+                System.Buffer.BlockCopy(pixels, top, row, 0, stride);
+                System.Buffer.BlockCopy(pixels, bottom, pixels, top, stride);
+                System.Buffer.BlockCopy(row, 0, pixels, bottom, stride);
             }
         }
 
@@ -1723,8 +1856,12 @@ namespace AnimeStudio.GUI
 
                 if (assetListView.SelectedIndices.Count == 1)
                 {
-                    goToSceneHierarchyToolStripMenuItem.Visible = true;
-                    showOriginalFileToolStripMenuItem.Visible = true;
+                    var selectedAsset = (AssetItem)assetListView.Items[assetListView.SelectedIndices[0]];
+                    if (!selectedAsset.IsVirtual)
+                    {
+                        goToSceneHierarchyToolStripMenuItem.Visible = true;
+                        showOriginalFileToolStripMenuItem.Visible = true;
+                    }
                 }
                 if (assetListView.SelectedIndices.Count >= 1)
                 {
@@ -1768,6 +1905,11 @@ namespace AnimeStudio.GUI
         private void showOriginalFileToolStripMenuItem_Click(object sender, EventArgs e)
         {
             var selectasset = (AssetItem)assetListView.Items[assetListView.SelectedIndices[0]];
+            if (selectasset.IsVirtual || selectasset.SourceFile == null)
+            {
+                return;
+            }
+
             var args = $"/select, \"{selectasset.SourceFile.originalPath ?? selectasset.SourceFile.fullName}\"";
             var pfi = new ProcessStartInfo("explorer.exe", args);
             Process.Start(pfi);
@@ -2344,6 +2486,22 @@ namespace AnimeStudio.GUI
         {
             Properties.Settings.Default.enableModelPreview = enableModelPreview.Checked;
             Properties.Settings.Default.Save();
+        }
+
+        public void updateGame(Game game)
+        {
+            int index = GameManager.GetGameIndex(game);
+            Properties.Settings.Default.selectedGame = index;
+            Properties.Settings.Default.Save();
+            ResetForm();
+            Studio.Game = game;
+            Logger.Info($"Target Game is {Studio.Game.Name}");
+            if (Studio.Game.IsUnityCN() && Studio.Game is UnityCNGame unityCnGame)
+            {
+                UnityCNManager.SetKey(unityCnGame.Key);
+            }
+            assetsManager.SpecifyUnityVersion = specifyUnityVersion.Text;
+            assetsManager.Game = Studio.Game;
         }
 
         public void updateGame(GameType mapGame)

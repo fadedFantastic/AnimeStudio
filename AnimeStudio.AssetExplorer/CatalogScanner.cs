@@ -13,7 +13,7 @@ internal static class CatalogScanner
         var manager = new AssetsManager { Game = GameManager.GetGameByType(game), SkipProcess = true, ResolveDependencies = false };
         try
         {
-            manager.LoadFilesPreprocessed(path);
+            manager.LoadFiles(new[] { path }, mergeSplitAssets: false);
             token.ThrowIfCancellationRequested();
             if (manager.assetsFileList.Count == 0) throw new InvalidDataException("未读取到 Unity CAB：" + path);
             var rows = new List<CatalogAsset>();

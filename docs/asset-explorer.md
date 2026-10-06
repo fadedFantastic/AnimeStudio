@@ -36,7 +36,9 @@ ZZZ 的部分原始模型（例如 `Avatar_Female_Size02_Remielle_Origin_Model.f
 
 功能代码在独立项目 `AnimeStudio.AssetExplorer`。GUI 中只有项目引用、初始化入口、可等待的资产树构建和独立的 `MainForm.AssetExplorer.cs` 适配层。扫描运行在子进程中，避免上游 Logger、TypeFlags、CABMap 等静态状态干扰 Studio。
 
-核心加载器另外修复了一处问题：手动 bundle 偏移原先只对 Endfield 生效，ZZZ 会读取整个 blk。现在所有提供偏移的 blk 加载都按偏移执行。资源身份使用源文件、bundle 偏移、CAB 和 PathID，名称不作为身份。
+核心加载器另外修复了一处问题：手动 bundle 偏移原先只对 Endfield 生效，ZZZ 会读取整个 blk。现在仅将支持范围扩展至 ZZZ，其他游戏保持上游行为。批量加载复用上游的 `LoadFiles(files, mergeSplitAssets: false)` 接口。资源身份使用源文件、bundle 偏移、CAB 和 PathID，名称不作为身份。
+
+合并最新上游后，启用了其 ZZZ V2 动画解码器，并修正 V2 缓冲区释放函数的 DLL 绑定。解码后会验证帧数、曲线数和样本数一致，避免遗漏标量曲线后在 FBX 转换中越界。
 
 ## 本机验收（2026-10-06）
 
@@ -53,4 +55,4 @@ ZZZ 的部分原始模型（例如 `Avatar_Female_Size02_Remielle_Origin_Model.f
 
 回归检查：`dotnet run --project tests/AnimeStudio.AssetExplorer.Tests -- --test <输出目录>`。
 
-此环境的 NuGet 下载曾因自动审批服务故障受阻，本次 .NET 10 验收使用现有依赖 DLL 离线编译同一套源码；未完成 .NET 9 的运行验证。
+同步到上游 `db860e1` 后，已通过正常 NuGet 恢复重新构建 GUI、CLI 和发布包的 .NET 9/10 版本，并在 .NET 10 下运行回归及真实资源导出测试。.NET 9 进行了编译验证，未进行运行验证。

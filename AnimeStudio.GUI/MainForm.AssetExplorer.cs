@@ -49,7 +49,7 @@ partial class MainForm
                 manager.ResolveDependencies = false; // The plan already contains the exact transitive CAB offsets.
                 manager.FilterData = new AssetsManager.AssetFilterData { Items = plan.Offsets.ToList() };
                 using (token.Register(() => manager.tokenSource.Cancel()))
-                    await Task.Run(() => manager.LoadFilesPreprocessed(plan.Files), token);
+                    await Task.Run(() => manager.LoadFiles(plan.Files, mergeSplitAssets: false), token);
                 token.ThrowIfCancellationRequested();
                 foreach (var asset in plan.Selected) CabCatalog.Find(manager, asset);
                 await Task.Run(() => SeparateMeshSupport.CompleteLoad(manager, request, plan.Selected, Logger.Info, token), token);
@@ -70,8 +70,8 @@ partial class MainForm
 
         public async Task LoadAsync(CatalogRequest request, CancellationToken token)
         {
-            await Load(request, false, token);
-            await form.BuildAssetStructures();
+            var plan = await Load(request, false, token);
+            await form.BuildAssetStructures(plan.Files);
         }
 
         public async Task<string> ExportAssetsAsync(CatalogRequest request, string folder, CancellationToken token)
@@ -92,7 +92,7 @@ partial class MainForm
                 }, token);
                 return $"导出完成：{exported} 个资源，{skipped} 个跳过（已存在或该类型不支持单独转换）。目录：{folder}";
             }
-            finally { await form.BuildAssetStructures(); }
+            finally { await form.BuildAssetStructures(plan.Files); }
         }
 
         public async Task<string> ExportModelsAsync(CatalogRequest request, string folder, CancellationToken token)
@@ -118,7 +118,7 @@ partial class MainForm
                     folder, options, Logger.Info, token), token);
                 return $"已导出 {result.Count} 个 FBX，包含 {result.Sum(x => x.Animations.Length)} 段动画、{result.Sum(x => x.Textures.Length)} 张贴图。目录：{folder}";
             }
-            finally { await form.BuildAssetStructures(); }
+            finally { await form.BuildAssetStructures(plan.Files); }
         }
     }
 }

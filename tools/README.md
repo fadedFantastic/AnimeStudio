@@ -54,7 +54,7 @@
 .\tools\Build-ZzzAssetMap.ps1 -Rebuild
 ```
 
-## 速度
+## 历史速度基准（旧版 CLI）
 
 全量约 80 GB / 16000 个 blk。在机械硬盘上实测：
 
@@ -138,8 +138,8 @@ CLI 读到之后就能把 `Container` 还原成 `assets\...\xxx.prefab` 这种�
 
 ```powershell
 $cli = '.\AnimeStudio.CLI\bin\Release\net10.0-windows\AnimeStudio.CLI.exe'
-& $cli --game ZZZ --types Texture2D --names '^Anby' `
-    'E:\...\Blocks\2429662787.blk' .\out
+& $cli 'E:\...\Blocks\2429662787.blk' .\out `
+    --game ZZZ --types Texture2D --names '^Anby'
 ```
 
 **注意**：CLI 目前没法同时「加载 CABMap 解析依赖」和「导出资源」——
@@ -152,7 +152,7 @@ $cli = '.\AnimeStudio.CLI\bin\Release\net10.0-windows\AnimeStudio.CLI.exe'
 ## 常见问题
 
 **扫描很慢 / 想中断**
-Ctrl+C 即可，已写入的日志保留。但清单是最后一次性写出的，中断就得重来。可以先拿一小部分
+Ctrl+C 即可，已写入的日志保留。默认 JSON 清单需等扫描结束才能完整写出，CLI 中断后仍需重扫；需要复用已扫描结果时使用新工具的增量索引。可以先拿一小部分
 试水：把几十个 blk 复制到临时目录，然后 `-GameDir <临时目录> -WholeStreamingAssets`。
 
 **日志里一堆 `Error while reading` / `no assets found`**

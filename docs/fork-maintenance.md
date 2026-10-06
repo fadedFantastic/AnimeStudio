@@ -1,87 +1,66 @@
-# Fork 上传与同步审查
+# Fork 维护方式
 
-## 当前仓库来源
+## 已配置的结构
 
-本地 reflog 的最初记录是 `clone: from https://github.com/Escartem/AnimeStudio.git`。
-当前唯一配置的远端 `origin` 也指向 Escartem，上游历史已获取，但本轮没有修改远端地址、切换分支、合并、提交或推送。
+- `origin`：`https://github.com/fadedFantastic/AnimeStudio.git`
+- `upstream`：`https://github.com/Escartem/AnimeStudio.git`
+- `master`：保持上游原版，本次已快进到 `db860e1`。
+- `codex/asset-explorer`：自用功能分支，保留 Asset Explorer、分离网格导出、CLI 索引选项和打包修复，并整合上述上游版本。
 
-本次核对的提交位置：
+本次只在本地保存提交和合并，没有推送。核对时 GitHub 上的 `origin/master` 仍是 `a4220d4`，比本地 master 落后 56 个上游提交。网页 Sync Fork 或之后推送本地 master 都可以更新它；远端状态变化后应重新 fetch 核对。
 
-| 位置 | master 提交 | 关系 |
-| --- | --- | --- |
-| 本地工作区基线 | `7cfb26b` | 比 fadedFantastic/master 落后 6 个提交 |
-| fadedFantastic/AnimeStudio | `a4220d4` | 比 Escartem/master 落后 56 个提交，无独有提交 |
-| Escartem/AnimeStudio | `db860e1` | 比本地基线领先 62 个提交 |
+原始修改先按 CLI/资源分析工具、Asset Explorer、打包修复三个提交保存，再整合上游，便于后续追踪和移植。
 
-这些数字对应上述提交快照，后续远端更新后需重新核对。
+## 整合时保留的边界
 
-## 本轮清理与上传范围
+- 新窗口、索引、路径恢复、依赖加载和模型导出集中在 `AnimeStudio.AssetExplorer`，通过 `MainForm.AssetExplorer.cs` 连接 Studio。
+- 批量加载复用上游 `LoadFiles(files, mergeSplitAssets: false)`，已去掉重复的 `LoadFilesPreprocessed` 实现。
+- 显式 bundle 偏移仅扩展到 ZZZ，原有 Endfield 保持支持，其他游戏保持上游行为。
+- `AssetsHelper` 保留上游逐 bundle 回调、流式输出和 HSR 内存释放修复。可选 hash/预读配置及辅助类放在 `AssetsHelper.IndexingOptions.cs`，预读默认关闭。
+- CLI 的 `--no_hash` 和 `--read_ahead` 已移植到上游新的 System.CommandLine API。
+- `build.ps1` 保留上游原生 DLL 打包规则，只修改发布副本的 apphost。编译目录里的 GUI/CLI 仍可直接启动。可用 `-OutputRoot` 指定独立的打包目录。
+- 真实动画测试发现上游默认旧 ZZZ 解码路径遗漏标量曲线，因此启用了上游已有的 V2 解码器，修正 V2 Dispose 的 DLL 绑定与输入缓冲区处理，并验证解码样本数量。其他游戏的解码分支未切换。
+- 原生解码器改为对应上游的新 DLL 布局，测试项目通过项目引用获取原生依赖，不再复制已删除的 x86/x64 目录。
 
-- 已清理本次开发的六个模型验证输出目录，以及已使用完毕的一次性清理脚本。
-- 正式程序仍在 `AnimeStudio.GUI/bin/Release/net10.0-windows`；现有 `dist/net10.0-windows` 发布包及其 Maps 目录保留。
-- `dist/`、编译产生的 `bin/obj` 原本已忽略；新增 `/zzz-map/`、`/asset-explorer-test-output/` 和 `/.claude/settings.local.json` 忽略规则。
-- `zzz-map/Maps/Z3-AssetIndex-Eleiyas.json` 是约 68 MB 的下载缓存，保留本地使用，不上传。
-- 上传内容应为新模块、GUI 适配层、回归测试、源码修改、工具脚本和文档；不包含游戏资源、清单缓存、导出的 FBX/贴图和可执行文件。
+这些是后续合并需要重点保留的少量接入点。不要用整文件的 ours/theirs 覆盖核心加载器、动画解码器或打包脚本。
 
-## 同步冲突预演
+## 日常同步
 
-使用本地基线、当前工作区文件和远端文件进行 `git merge-file -p` 三方预演，没有执行真实合并。
+先确认工作区修改已经保存在功能分支，工作区干净，再执行：
 
-| 本地改动文件 | 合并 fadedFantastic/master | 合并 Escartem/master |
-| --- | --- | --- |
-| `AnimeStudio/AssetsHelper.cs` | 4 处冲突 | 4 处冲突 |
-| `build.ps1` | 3 处冲突 | 3 处冲突 |
-| `AnimeStudio.CLI/Components/CommandLine.cs` | 文本合并干净 | 3 处冲突 |
-| `AnimeStudio.GUI/MainForm.cs` | 文本合并干净 | 4 处冲突 |
-| `AnimeStudio.slnx` | 文本合并干净 | 1 处冲突 |
+```powershell
+git fetch upstream
+git switch master
+git merge --ff-only upstream/master
+git switch codex/asset-explorer
+git merge master
+```
 
-其余已修改的受跟踪文件文本合并干净；新增文件未发现同路径冲突。
-这只是文本合并检查，不等于合并后编译或运行通过。
+有冲突时手工整合，完成构建和测试后提交合并。`master` 不放自用功能，便于持续使用 GitHub 的 Sync Fork；功能都在 `codex/asset-explorer` 上维护。
 
-## 关键改动与维护建议
+准备上传时再执行以下命令，本次没有执行：
 
-### 核心加载器
+```powershell
+git push origin master
+git push -u origin codex/asset-explorer
+```
 
-`AssetsManager.cs` 增加了 `LoadFilesPreprocessed`，并把显式 bundle 偏移应用范围从 Endfield 扩大到了所有游戏。后者是运行行为变化，不能作为纯 UI 改动看待；目前主要验证了 ZZZ。整合时建议限制为 ZZZ 与原有 Endfield，或改成新工具显式启用的选项。
+不需要强制推送，也不需要重新 clone。GitHub 默认展示 master，查看自用功能时切换到 `codex/asset-explorer`。
 
-上游现在已有 `LoadFiles(string[] files, bool mergeSplitAssets)`。整合后可以改用 `mergeSplitAssets: false`，减少维护自定义 `LoadFilesPreprocessed` 接口的必要性。
+## 构建和验证
 
-### 核心索引与旧 CLI 优化
+```powershell
+dotnet build AnimeStudio.GUI -c Release -f net10.0-windows
+dotnet build AnimeStudio.CLI -c Release -f net10.0-windows
+dotnet run --project tests/AnimeStudio.AssetExplorer.Tests -c Release -- --test asset-explorer-test-output
+```
 
-`AssetsHelper.cs` 的跳过 hash、预读和批量预处理来自此前的 CLI 索引优化，新 Asset Explorer 的扫描器并不依赖这些开关。上游已把旧索引循环改成逐 bundle 回调和流式写出，并加入 HSR 大文件的内存释放修复。
+保留 .NET 9 发布时同时构建该目标。打包可运行 `build.ps1`；验证包建议通过 `-OutputRoot` 指定临时输出位置，避免覆盖已有发布包中的 Maps 数据。
 
-不能在冲突时整文件选择本地版本，否则可能丢掉上游的 OOM 修复。建议把旧 CLI 优化作为独立提交组；保留时应移植到上游新流程中。`ReadAhead` 默认为 0，可独立考虑是否继续维护。
+本次用正常 NuGet 恢复完成 .NET 9/10 构建及打包；在 .NET 10 下运行回归测试、验证 CLI hash 开关，并实际导出 Remielle 的 27 个网格和额外选择的 Gal_Idle 动画。动画解码输出为 242 帧 × 3918 条曲线，未丢弃标量曲线。.NET 9 未做运行验证。
 
-### GUI 接入
+新增 `.github/workflows/asset-explorer.yml`，在功能分支推送、PR 或手动触发时检查 GUI/CLI 的 .NET 9/10 构建及 .NET 10 回归。上游原来的 Build 工作流保持不变，发布功能分支时可以手动选择该分支触发。
 
-大部分新逻辑在 `AnimeStudio.AssetExplorer` 和 `MainForm.AssetExplorer.cs` 中；原有 `MainForm.cs` 只增加初始化入口，并把资产结构构建改成可等待的 Task。继续保持这种边界，不要把新功能大面积塞回上游窗体文件。
+## 上传范围
 
-最新上游已经迁移了 GUI 图像处理依赖，并调整了原生 DLL 的布局。即便项目文件自动合并成功，也需要重新构建和验证 FBX、动画、贴图及音频加载。测试项目中的原生 DLL 复制路径也要随上游调整。
-
-### 打包脚本
-
-本地修复把 apphost 路径补丁限定到 dist 副本，使编译目录中的 GUI/CLI 仍可直接运行。你的 fork 中已经有另一套防止 `bin\\bin\\` 叠加的修复，最新上游还调整了 DLL 拷贝与目录整理。
-
-合并时保留新的原生库打包要求，同时保留“只修改发布副本”的约束；不要用本地旧脚本覆盖整个上游脚本。
-
-## 推荐维护方式
-
-1. 在准备提交时先将本地功能保存到独立功能分支，按 CLI 优化、Asset Explorer、打包修复分组，便于逐组移植。本次审查没有创建提交。
-2. 把远端整理为自己的 `origin` 和上游 `upstream`。当前配置下对应命令如下，尚未执行：
-
-   ```powershell
-   git remote rename origin upstream
-   git remote add origin https://github.com/fadedFantastic/AnimeStudio.git
-   git fetch origin
-   ```
-
-3. 尽量让 fork 的 `master` 保持与上游同步，自用功能维护在独立分支。当前 fork 没有独有提交，可先同步其 master；然后将功能分支与最新上游合并，手工处理上表冲突。
-4. 未保存当前修改前，不要直接覆盖或重置工作区。也不需要重新 clone，更不应靠强制推送解决历史不同的问题。
-5. 合并后重新执行 .NET 10 构建和回归测试；保留 .NET 9 发布目标时也要验证它。另用真实 ZZZ 模型验证分离网格、所选动画与贴图输出，以及编译目录/发布目录两个启动入口。
-
-   ```powershell
-   dotnet build AnimeStudio.GUI -c Release -f net10.0-windows
-   dotnet run --project tests/AnimeStudio.AssetExplorer.Tests -- --test asset-explorer-test-output
-   ```
-
-6. 当前 GitHub Actions 只在 master 推送时自动构建。功能分支可以手动触发 workflow_dispatch；若需要功能分支自动验证，再单独增加相应触发条件。
+只上传源码、测试、脚本和文档。`dist/`、`bin/obj`、`zzz-map/`、默认测试输出和本机配置均已忽略；游戏清单、下载字典、FBX/贴图和编译产物不应进入 Git。

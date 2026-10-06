@@ -128,7 +128,7 @@ public sealed class CabCatalog
             FilterData = new() { Items = [new() { Source = row.Source, Offset = row.Offset }] } };
         try
         {
-            using (token.Register(() => manager.tokenSource.Cancel())) manager.LoadFilesPreprocessed(row.Source);
+            using (token.Register(() => manager.tokenSource.Cancel())) manager.LoadFiles(new[] { row.Source }, mergeSplitAssets: false);
             token.ThrowIfCancellationRequested();
             var entries = manager.assetsFileList.Where(f => (row.Offset < 0 || f.offset == row.Offset) &&
                 (string.IsNullOrEmpty(row.Cab) ? f.m_Objects.Any(o => o.m_PathID == row.PathID) : f.fileName.Equals(row.Cab, StringComparison.OrdinalIgnoreCase)))

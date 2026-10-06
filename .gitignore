@@ -1,4 +1,5 @@
 dist/*
+saved_transformation_options.xml
 
 # Local asset catalogs, downloaded path dictionaries and regression outputs.
 /zzz-map/

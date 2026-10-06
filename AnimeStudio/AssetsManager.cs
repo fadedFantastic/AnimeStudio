@@ -15,8 +15,17 @@ namespace AnimeStudio
         public Game Game;
         public bool Silent = false;
         public bool SkipProcess = false;
-        public bool ResolveDependencies = false;        
+        public bool ResolveDependencies = false;
         public string SpecifyUnityVersion;
+        /// <summary>
+        /// Invoked after each bundle/CAB group is loaded from a multi-bundle block.
+        /// Used by map builders to process + release streams before the next bundle
+        /// so peak RAM stays proportional to one bundle instead of the whole .block.
+        /// </summary>
+        public Action AfterBundleLoaded;
+
+        /// <summary>Number of cached resource streams (for map-builder flush decisions).</summary>
+        public int ResourceFileCount => resourceFileReaders.Count;
         public CancellationTokenSource tokenSource = new CancellationTokenSource();
         public List<SerializedFile> assetsFileList = new List<SerializedFile>();
 
@@ -64,40 +73,38 @@ namespace AnimeStudio
 
         public void LoadFiles(params string[] files)
         {
-            if (Silent)
-            {
-                Logger.Silent = true;
-                Progress.Silent = true;
-            }
-
-            var path = Path.GetDirectoryName(Path.GetFullPath(files[0]));
-            MergeSplitAssets(path);
-            var toReadFile = ProcessingSplitFiles(files.ToList());
-            if (ResolveDependencies)
-                toReadFile = AssetsHelper.ProcessDependencies(toReadFile);
-            Load(toReadFile);
-
-            if (Silent)
-            {
-                Logger.Silent = false;
-                Progress.Silent = false;
-            }
+            LoadFiles(files, mergeSplitAssets: true);
         }
 
-        /// <summary>
-        /// 给已经自己做过 split 合并/过滤的调用方用。
-        /// LoadFiles 每次都会 MergeSplitAssets 一遍，也就是把整个目录重新枚举一次；
-        /// 逐文件循环调用时这笔开销会乘以文件数，在大目录上非常可观。
-        /// </summary>
-        public void LoadFilesPreprocessed(params string[] files)
+        /// <param name="mergeSplitAssets">
+        /// When false, skips <see cref="ImportHelper.MergeSplitAssets"/> / split-file filtering.
+        /// Map builders already do that once up front; repeating it per file re-scans huge directories (HSR).
+        /// </param>
+        public void LoadFiles(string[] files, bool mergeSplitAssets)
         {
             if (Silent)
             {
                 Logger.Silent = true;
                 Progress.Silent = true;
             }
+          
+            if (Game?.Type == GameType.AFKJourney)
+            {
+                files = OrderFilesForLoading(files);
+            }
 
-            var toReadFile = files;
+            string[] toReadFile;
+            if (mergeSplitAssets)
+            {
+                var path = Path.GetDirectoryName(Path.GetFullPath(files[0]));
+                MergeSplitAssets(path);
+                toReadFile = ProcessingSplitFiles(files.ToList());
+            }
+            else
+            {
+                toReadFile = files;
+            }
+
             if (ResolveDependencies)
                 toReadFile = AssetsHelper.ProcessDependencies(toReadFile);
             Load(toReadFile);
@@ -119,6 +126,10 @@ namespace AnimeStudio
 
             MergeSplitAssets(path, true);
             var files = Directory.GetFiles(path, "*.*", SearchOption.AllDirectories).ToList();
+            if (Game?.Type == GameType.AFKJourney)
+            {
+                files = OrderFilesForLoading(files).ToList();
+            }
             var toReadFile = ProcessingSplitFiles(files);
             Load(toReadFile);
 
@@ -164,11 +175,71 @@ namespace AnimeStudio
             }
         }
 
+        private static string[] OrderFilesForLoading(IEnumerable<string> files)
+        {
+            return files
+                .OrderBy(file => GetLoadPriority(Path.GetFileName(file)))
+                .ThenBy(file => new FileInfo(file).Length)
+                .ThenBy(file => file, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+
+        private static int GetLoadPriority(string fileName)
+        {
+            return fileName.ToLowerInvariant() switch
+            {
+                "globalgamemanagers" => 0,
+                "data.unity3d" => 1,
+                _ => 2,
+            };
+        }
+
         private void LoadFile(string fullName)
         {
+            if (Game?.Type == GameType.AFKJourney && AFKJourneyUtils.IsLpakPath(fullName))
+            {
+                if (LoadAfkJourneyLpakFile(fullName))
+                {
+                    return;
+                }
+            }
+
             var reader = new FileReader(fullName);
             reader = reader.PreProcessing(Game);
             LoadFile(reader);
+        }
+
+        private bool LoadAfkJourneyLpakFile(string fullName)
+        {
+            var chunks = AFKJourneyUtils.ScanLpakUnityFsChunks(fullName);
+            if (chunks.Count == 0)
+            {
+                Logger.Warning($"AFK Journey lpak {fullName} did not contain valid UnityFS chunks. Falling back to normal loading.");
+                return false;
+            }
+
+            Logger.Info($"Loading AFK Journey lpak {fullName} ({chunks.Count} UnityFS chunks)");
+            try
+            {
+                using var stream = File.Open(fullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                Progress.Reset();
+                for (var i = 0; i < chunks.Count; i++)
+                {
+                    var chunk = chunks[i];
+                    var chunkPath = AFKJourneyUtils.GetLpakChunkVirtualPath(fullName, chunk);
+                    Logger.Verbose($"Loading AFK Journey lpak chunk {i + 1}/{chunks.Count} at 0x{chunk.Offset:X8}, size 0x{chunk.Size:X8}");
+                    var chunkStream = new BoundedStream(stream, chunk.Offset, chunk.Size, leaveOpen: true);
+                    var reader = new FileReader(chunkPath, chunkStream);
+                    LoadGameBlockFile(reader, fullName, chunk.Offset, false);
+                    Progress.Report(i + 1, chunks.Count);
+                }
+            }
+            catch (Exception e)
+            {
+                Logger.Error($"Error while reading AFK Journey lpak {fullName}", e);
+            }
+
+            return true;
         }
 
         private void LoadFile(FileReader reader)
@@ -249,34 +320,41 @@ namespace AnimeStudio
                     assetsFileIndexCache.Add(assetsFile.fileName, assetsFileList.Count - 1);
                     assetsFileListHash.Add(assetsFile.fileName);
 
-                    foreach (var sharedFile in assetsFile.m_Externals)
+                    // External lookup does recursive Directory.GetFiles scans. Skip it when
+                    // dependencies are not being resolved (map builds, single-file loads) —
+                    // HSR-style CAB externals are almost never real on-disk files and the
+                    // repeated full-directory scans dominate both CPU and temporary allocations.
+                    if (ResolveDependencies)
                     {
-                        Logger.Verbose($"{assetsFile.fileName} needs external file {sharedFile.fileName}, attempting to look it up...");
-                        var sharedFileName = sharedFile.fileName;
-
-                        if (!importFilesHash.Contains(sharedFileName))
+                        foreach (var sharedFile in assetsFile.m_Externals)
                         {
-                            var sharedFilePath = Path.Combine(Path.GetDirectoryName(reader.FullPath), sharedFileName);
-                            if (!noexistFiles.Contains(sharedFilePath))
+                            Logger.Verbose($"{assetsFile.fileName} needs external file {sharedFile.fileName}, attempting to look it up...");
+                            var sharedFileName = sharedFile.fileName;
+
+                            if (!importFilesHash.Contains(sharedFileName))
                             {
-                                if (!File.Exists(sharedFilePath))
+                                var sharedFilePath = Path.Combine(Path.GetDirectoryName(reader.FullPath), sharedFileName);
+                                if (!noexistFiles.Contains(sharedFilePath))
                                 {
-                                    var findFiles = Directory.GetFiles(Path.GetDirectoryName(reader.FullPath), sharedFileName, SearchOption.AllDirectories);
-                                    if (findFiles.Length > 0)
+                                    if (!File.Exists(sharedFilePath))
                                     {
-                                        Logger.Verbose($"Found {findFiles.Length} matching files, picking first file {findFiles[0]} !!");
-                                        sharedFilePath = findFiles[0];
+                                        var findFiles = Directory.GetFiles(Path.GetDirectoryName(reader.FullPath), sharedFileName, SearchOption.AllDirectories);
+                                        if (findFiles.Length > 0)
+                                        {
+                                            Logger.Verbose($"Found {findFiles.Length} matching files, picking first file {findFiles[0]} !!");
+                                            sharedFilePath = findFiles[0];
+                                        }
                                     }
-                                }
-                                if (File.Exists(sharedFilePath))
-                                {
-                                    importFiles.Add(sharedFilePath);
-                                    importFilesHash.Add(sharedFileName);
-                                }
-                                else
-                                {
-                                    Logger.Verbose("Nothing was found, caching into non existant files to avoid repeated searching !!");
-                                    noexistFiles.Add(sharedFilePath);
+                                    if (File.Exists(sharedFilePath))
+                                    {
+                                        importFiles.Add(sharedFilePath);
+                                        importFilesHash.Add(sharedFileName);
+                                    }
+                                    else
+                                    {
+                                        Logger.Verbose("Nothing was found, caching into non existant files to avoid repeated searching !!");
+                                        noexistFiles.Add(sharedFilePath);
+                                    }
                                 }
                             }
                         }
@@ -297,6 +375,7 @@ namespace AnimeStudio
 
         private void LoadAssetsFromMemory(FileReader reader, string originalPath, string unityVersion = null, long originalOffset = 0)
         {
+            unityVersion = ResolveUnityVersionHint(originalPath, unityVersion);
             Logger.Verbose($"Loading asset file {reader.FileName} with version {unityVersion} from {originalPath} at offset 0x{originalOffset:X8}");
             if (!assetsFileListHash.Contains(reader.FileName))
             {
@@ -305,7 +384,7 @@ namespace AnimeStudio
                     var assetsFile = new SerializedFile(reader, this);
                     assetsFile.originalPath = originalPath;
                     assetsFile.offset = originalOffset;
-                    if (!string.IsNullOrEmpty(unityVersion) && assetsFile.header.m_Version < SerializedFileFormatVersion.Unknown_7)
+                    if (!string.IsNullOrEmpty(unityVersion) && (assetsFile.header.m_Version < SerializedFileFormatVersion.Unknown_7 || assetsFile.IsVersionStripped || assetsFile.unityVersion == "0.0.0"))
                     {
                         assetsFile.SetVersion(unityVersion);
                     }
@@ -317,11 +396,65 @@ namespace AnimeStudio
                 catch (Exception e)
                 {
                     Logger.Error($"Error while reading assets file {reader.FullPath} from {Path.GetFileName(originalPath)}", e);
-                    resourceFileReaders.TryAdd(reader.FileName, reader);
+                    // Only retain the reader if we actually cache it; otherwise free its stream.
+                    if (!resourceFileReaders.TryAdd(reader.FileName, reader))
+                    {
+                        reader.Dispose();
+                    }
                 }
             }
             else
+            {
                 Logger.Info($"Skipping {originalPath} ({reader.FileName})");
+                // Duplicate CAB name inside the same block (or already loaded) — the stream was
+                // freshly allocated by BundleFile.ReadFiles and would otherwise leak until GC.
+                reader.Dispose();
+            }
+        }
+
+        private string ResolveUnityVersionHint(string originalPath, string unityVersion)
+        {
+            if (!string.IsNullOrEmpty(unityVersion) && unityVersion != "0.0.0")
+            {
+                return unityVersion;
+            }
+
+            if (!string.IsNullOrEmpty(SpecifyUnityVersion))
+            {
+                return SpecifyUnityVersion;
+            }
+
+            if (Game?.Type != GameType.AFKJourney || string.IsNullOrEmpty(originalPath))
+            {
+                return unityVersion;
+            }
+
+            try
+            {
+                var directory = Path.GetDirectoryName(Path.GetFullPath(originalPath));
+                while (!string.IsNullOrEmpty(directory))
+                {
+                    var globalGameManagersPath = Path.Combine(directory, "globalgamemanagers");
+                    if (File.Exists(globalGameManagersPath))
+                    {
+                        using var versionReader = new FileReader(globalGameManagersPath);
+                        var versionFile = new SerializedFile(versionReader, this);
+                        if (!string.IsNullOrEmpty(versionFile.unityVersion) && versionFile.unityVersion != "0.0.0")
+                        {
+                            Logger.Verbose($"Resolved AFK Journey Unity version {versionFile.unityVersion} from {globalGameManagersPath}");
+                            return versionFile.unityVersion;
+                        }
+                    }
+
+                    directory = Path.GetDirectoryName(directory);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Verbose($"Failed to resolve AFK Journey Unity version from install root: {ex.Message}");
+            }
+
+            return unityVersion;
         }
 
         private void LoadWebFile(FileReader reader)
@@ -347,7 +480,10 @@ namespace AnimeStudio
                             break;
                         case FileType.ResourceFile:
                             Logger.Verbose("Caching resource stream");
-                            resourceFileReaders.TryAdd(file.fileName, subReader); //TODO
+                            if (!resourceFileReaders.TryAdd(file.fileName, subReader))
+                            {
+                                subReader.Dispose();
+                            }
                             break;
                     }
                 }
@@ -440,7 +576,10 @@ namespace AnimeStudio
                             {
                                 entryReader.Position = 0;
                                 Logger.Verbose("Caching resource file");
-                                resourceFileReaders.TryAdd(entry.Name, entryReader);
+                                if (!resourceFileReaders.TryAdd(entry.Name, entryReader))
+                                {
+                                    entryReader.Dispose();
+                                }
                             }
                         }
                         catch (Exception e)
@@ -482,7 +621,7 @@ namespace AnimeStudio
                     var total = stream.Length;
 
                     OffsetData.TryGetValue(reader.FileName, out var manualOffsets);
-                    bool isManualOffsets = manualOffsets != null && manualOffsets.Count > 0;
+                    bool isManualOffsets = manualOffsets != null && manualOffsets.Count > 0 && (Game.Type.IsArknightsEndfieldGroup() || Game.Type.IsZZZGroup());
                     IEnumerable<long> offsetsEnumerable = isManualOffsets
                         ? manualOffsets
                         : stream.GetOffsets(reader.FullPath);
@@ -563,7 +702,12 @@ namespace AnimeStudio
                     else
                     {
                         Logger.Verbose("Caching resource stream");
-                        resourceFileReaders.TryAdd(innerFile.fileName, cabReader); //TODO
+                        // Dispose immediately on name collision — TryAdd would otherwise drop the
+                        // new stream with no owner while the previous one stays cached.
+                        if (!resourceFileReaders.TryAdd(innerFile.fileName, cabReader))
+                        {
+                            cabReader.Dispose();
+                        }
                     }
                 }
             }
@@ -603,12 +747,23 @@ namespace AnimeStudio
             finally
             {
                 reader.Dispose();
+                // Notify map builders after each bundle so they can flush entries and free streams.
+                AfterBundleLoaded?.Invoke();
             }
         }
 
         public void CheckStrippedVersion(SerializedFile assetsFile)
         {
-            if(Game.Type.IsAzurPromiliaCBT2() && assetsFile.IsVersionStripped) SpecifyUnityVersion = "2022.3.62f3";
+            if (Game != null && Game.Type.IsAzurPromiliaCBT2() && assetsFile.IsVersionStripped)
+            {
+                SpecifyUnityVersion = "2022.3.62f3";
+            }
+
+            if (Game?.Type == GameType.AFKJourney && !assetsFile.IsVersionStripped && string.IsNullOrEmpty(SpecifyUnityVersion) && !string.IsNullOrEmpty(assetsFile.unityVersion) && assetsFile.unityVersion != "0.0.0")
+            {
+                SpecifyUnityVersion = assetsFile.unityVersion;
+            }
+
             if (assetsFile.IsVersionStripped && string.IsNullOrEmpty(SpecifyUnityVersion))
             {
                 throw new Exception("The Unity version has been stripped, please set the version in the options");
@@ -619,13 +774,18 @@ namespace AnimeStudio
             }
         }
 
-        public void Clear()
+        /// <summary>
+        /// Dispose loaded asset/resource streams but keep <see cref="assetsFileListHash"/>
+        /// so subsequent bundles in the same block still skip already-seen CAB names.
+        /// </summary>
+        public void ClearLoadedAssets()
         {
-            Logger.Verbose("Cleaning up...");
+            Logger.Verbose("Cleaning loaded assets...");
 
             foreach (var assetsFile in assetsFileList)
             {
                 assetsFile.Objects.Clear();
+                assetsFile.ObjectsDic.Clear();
                 assetsFile.reader.Close();
             }
             assetsFileList.Clear();
@@ -637,12 +797,18 @@ namespace AnimeStudio
             resourceFileReaders.Clear();
 
             assetsFileIndexCache.Clear();
+        }
+
+        public void Clear()
+        {
+            Logger.Verbose("Cleaning up...");
+
+            ClearLoadedAssets();
+            OffsetData.Clear();
+            assetsFileListHash.Clear();
 
             tokenSource.Dispose();
             tokenSource = new CancellationTokenSource();
-
-            // GC.WaitForPendingFinalizers();
-            // GC.Collect();
         }
 
         private void ReadAssets()

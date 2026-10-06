@@ -76,7 +76,7 @@ if (args.FirstOrDefault() == "--integration")
         FilterData = new AssetsManager.AssetFilterData { Items = plan.Offsets.ToList() } };
     try
     {
-        watch.Restart(); manager.LoadFilesPreprocessed(plan.Files); manager.FilterData.Items.Clear();
+        watch.Restart(); manager.LoadFiles(plan.Files, mergeSplitAssets: false); manager.FilterData.Items.Clear();
         foreach (var asset in plan.Selected) Check(CabCatalog.Find(manager, asset) != null, "exact asset loaded: " + asset.Name);
         Console.WriteLine($"INTEGRATION load {watch.ElapsedMilliseconds} ms, {manager.assetsFileList.Count} CABs");
         if (args.Length > 5)
@@ -122,13 +122,22 @@ if (args.FirstOrDefault() == "--probe-request")
     var manager = new AssetsManager { Game = GameManager.GetGameByType(request.Game), FilterData = new() { Items = plan.Offsets.ToList() } };
     try
     {
-        manager.LoadFilesPreprocessed(plan.Files); manager.FilterData.Items.Clear();
+        manager.LoadFiles(plan.Files, mergeSplitAssets: false); manager.FilterData.Items.Clear();
         if (request.MeshCatalog != null)
         {
             var count = SeparateMeshSupport.CompleteLoad(manager, request, plan.Selected, Console.WriteLine, default);
             Console.WriteLine("SEPARATE_MESHES " + count);
         }
         var selected = plan.Selected.Select(a => CabCatalog.Find(manager, a)).ToArray();
+        foreach (var clip in selected.OfType<AnimationClip>())
+        {
+            var acl = clip.m_MuscleClip.m_Clip.m_ACLClip;
+            if (!acl.IsSet) continue;
+            acl.Process(manager.Game, out var values, out var times);
+            Console.WriteLine($"ACL {clip.Name}: kind={acl.GetType().Name}, curves={acl.CurveCount}, values={values.Length}, frames={times.Length}");
+            Check(times.Length > 0 && values.LongLength == (long)times.Length * acl.CurveCount, "ACL decoder preserves every curve in every frame");
+            Check(values.All(float.IsFinite), "ACL curve values are finite");
+        }
         foreach (var file in manager.assetsFileList)
             Console.WriteLine($"CAB {file.fileName} {file.originalPath} @{file.offset}: " + string.Join(", ", file.Objects.GroupBy(o => o.type).Select(g => $"{g.Key}={g.Count()}")));
         foreach (var obj in selected)
@@ -170,12 +179,18 @@ if (args.FirstOrDefault() == "--duplicate-copy")
         FilterData = new() { Items = plan.Offsets.ToList() } };
     try
     {
-        manager.LoadFilesPreprocessed(plan.Files);
+        manager.LoadFiles(plan.Files, mergeSplitAssets: false);
         Check(CabCatalog.Find(manager, plan.Selected[0]).assetsFile.originalPath.Equals(row.Source, StringComparison.OrdinalIgnoreCase),
             "noncanonical copy loads from selected physical blk");
     }
     finally { manager.Clear(); }
     return;
+}
+
+foreach (var decoder in new[] { typeof(ACLLibs.ACL), typeof(ACLLibs.SRACL), typeof(ACLLibs.DBACL) })
+{
+    System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(decoder.TypeHandle);
+    Check(true, "native decoder loads from the current package layout: " + decoder.Name);
 }
 
 var fixtures = new[]

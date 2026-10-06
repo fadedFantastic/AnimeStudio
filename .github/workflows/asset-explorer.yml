@@ -1,0 +1,33 @@
+name: Asset Explorer checks
+
+on:
+  push:
+    branches: [codex/asset-explorer]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        framework: [net9.0-windows, net10.0-windows]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            9.0.x
+            10.0.x
+      - name: Build GUI
+        run: dotnet build AnimeStudio.GUI -c Release -f ${{ matrix.framework }}
+      - name: Build CLI
+        run: dotnet build AnimeStudio.CLI -c Release -f ${{ matrix.framework }}
+      - name: Run regression checks
+        if: matrix.framework == 'net10.0-windows'
+        shell: pwsh
+        run: dotnet run --project tests/AnimeStudio.AssetExplorer.Tests -c Release -- --test "$env:RUNNER_TEMP/asset-explorer-tests"
