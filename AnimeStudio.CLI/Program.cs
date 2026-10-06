@@ -45,6 +45,8 @@ namespace AnimeStudio.CLI
                 Logger.Flags = o.LoggerFlags.Aggregate((e, x) => e |= x);
                 Logger.FileLogging = Settings.Default.enableFileLogging;
                 AssetsHelper.Minimal = Settings.Default.minimalAssetMap;
+                AssetsHelper.ComputeHash = !o.NoHash;
+                AssetsHelper.ReadAhead = o.ReadAhead;
                 AssetsHelper.SetUnityVersion(o.UnityVersion);
 
                 TypeFlags.SetTypes(JsonConvert.DeserializeObject<Dictionary<ClassIDType, (bool, bool)>>(Settings.Default.types));

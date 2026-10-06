@@ -30,6 +30,8 @@ namespace AnimeStudio.CLI
                 optionsBinder.MapOp,
                 optionsBinder.MapType,
                 optionsBinder.MapName,
+                optionsBinder.NoHash,
+                optionsBinder.ReadAhead,
                 optionsBinder.UnityVersion,
                 optionsBinder.GroupAssetsType,
                 optionsBinder.AssetExportType,
@@ -56,6 +58,8 @@ namespace AnimeStudio.CLI
         public MapOpType MapOp { get; set; }
         public ExportListType MapType { get; set; }
         public string MapName { get; set; }
+        public bool NoHash { get; set; }
+        public int ReadAhead { get; set; }
         public string UnityVersion { get; set; }
         public AssetGroupOption GroupAssetsType { get; set; }
         public ExportType AssetExportType { get; set; }
@@ -77,6 +81,8 @@ namespace AnimeStudio.CLI
         public readonly Option<MapOpType> MapOp;
         public readonly Option<ExportListType> MapType;
         public readonly Option<string> MapName;
+        public readonly Option<bool> NoHash;
+        public readonly Option<int> ReadAhead;
         public readonly Option<string> UnityVersion;
         public readonly Option<AssetGroupOption> GroupAssetsType;
         public readonly Option<ExportType> AssetExportType;
@@ -157,6 +163,8 @@ namespace AnimeStudio.CLI
             MapOp = new Option<MapOpType>("--map_op", "Specify which map to build.");
             MapType = new Option<ExportListType>("--map_type", "AssetMap output type.");
             MapName = new Option<string>("--map_name", () => "assets_map", "Specify AssetMap file name.");
+            NoHash = new Option<bool>("--no_hash", "Skip per-asset hash computation. Much faster when you only need the asset list.");
+            ReadAhead = new Option<int>("--read_ahead", () => 0, "Prefetch N files into the OS cache while parsing. Hurts on HDDs (head contention); only useful on SSDs.");
             UnityVersion = new Option<string>("--unity_version", "Specify Unity version.");
             GroupAssetsType = new Option<AssetGroupOption>("--group_assets", "Specify how exported assets should be grouped.");
             AssetExportType = new Option<ExportType>("--export_type", "Specify how assets should be exported.");
@@ -244,6 +252,8 @@ namespace AnimeStudio.CLI
             MapOp = bindingContext.ParseResult.GetValueForOption(MapOp),
             MapType = bindingContext.ParseResult.GetValueForOption(MapType),
             MapName = bindingContext.ParseResult.GetValueForOption(MapName),
+            NoHash = bindingContext.ParseResult.GetValueForOption(NoHash),
+            ReadAhead = bindingContext.ParseResult.GetValueForOption(ReadAhead),
             UnityVersion = bindingContext.ParseResult.GetValueForOption(UnityVersion),
             GroupAssetsType = bindingContext.ParseResult.GetValueForOption(GroupAssetsType),
             AssetExportType = bindingContext.ParseResult.GetValueForOption(AssetExportType),

@@ -19,6 +19,16 @@ namespace AnimeStudio
         public const string MapName = "Maps";
 
         public static bool Minimal = true;
+
+        // GetHash() 会把每个对象的完整字节读出来算 xxHash，只在版本比对时才有意义。
+        // 纯粹为了拿清单时关掉它，能省下大量 IO 和 GC。
+        public static bool ComputeHash = true;
+
+        // 预读多少个文件。机械硬盘上实测是负优化：预读线程和主线程抢磁头，
+        // 寻道开销远超重叠收益（深度 8 比不预读慢一倍）。默认关闭，
+        // 只有确认资源放在 SSD 上时才值得开。
+        public static int ReadAhead = 0;
+
         public static CancellationTokenSource tokenSource = new CancellationTokenSource();
 
         private static string BaseFolder = "";
@@ -171,19 +181,84 @@ namespace AnimeStudio
             }
         }
 
+        /// <summary>
+        /// 后台把接下来要处理的文件顺序读一遍，让它们进入系统文件缓存。
+        /// 主线程随后打开同一个文件时基本不用等磁盘，于是读盘和解析得以重叠。
+        /// 只是预热缓存，不持有数据，失败了也不影响正确性。
+        /// </summary>
+        private sealed class Prefetcher : IDisposable
+        {
+            private readonly IReadOnlyList<string> _files;
+            private readonly int _depth;
+            private readonly CancellationTokenSource _cts = new CancellationTokenSource();
+            private readonly Task _worker;
+            private int _cursor = -1;
+
+            public Prefetcher(IReadOnlyList<string> files, int depth)
+            {
+                _files = files;
+                _depth = depth;
+                _worker = Task.Run(Run);
+            }
+
+            /// <summary>告诉预读线程主线程处理到哪了，避免跑得太靠前。</summary>
+            public void Advance(int index) => Volatile.Write(ref _cursor, index);
+
+            private void Run()
+            {
+                var buffer = new byte[1 << 20];
+                var token = _cts.Token;
+                for (var next = 0; next < _files.Count && !token.IsCancellationRequested; )
+                {
+                    // 领先太多没意义：先读进来的会被后读的挤出缓存，白费一次磁盘往返
+                    if (next - Volatile.Read(ref _cursor) > _depth)
+                    {
+                        Thread.Sleep(5);
+                        continue;
+                    }
+                    try
+                    {
+                        using var fs = new FileStream(_files[next], FileMode.Open, FileAccess.Read,
+                            FileShare.ReadWrite, 1 << 20, FileOptions.SequentialScan);
+                        while (fs.Read(buffer, 0, buffer.Length) > 0)
+                        {
+                            if (token.IsCancellationRequested) return;
+                        }
+                    }
+                    catch
+                    {
+                        // 预读只是优化，读不到就让主线程走正常路径
+                    }
+                    next++;
+                }
+            }
+
+            public void Dispose()
+            {
+                _cts.Cancel();
+                try { _worker.Wait(TimeSpan.FromSeconds(2)); } catch { }
+                _cts.Dispose();
+            }
+        }
+
         private static IEnumerable<string> LoadFiles(string[] files)
         {
             string msg;
-            
+
             var path = Path.GetDirectoryName(Path.GetFullPath(files[0]));
             ImportHelper.MergeSplitAssets(path);
             var toReadFile = ImportHelper.ProcessingSplitFiles(files.ToList());
 
             var filesList = new List<string>(toReadFile);
+            using var prefetch = ReadAhead > 0 && filesList.Count > 1
+                ? new Prefetcher(filesList, ReadAhead)
+                : null;
+
             for (int i = 0; i < filesList.Count; i++)
             {
                 var file = filesList[i];
-                assetsManager.LoadFiles(file);
+                prefetch?.Advance(i);
+                assetsManager.LoadFilesPreprocessed(file);
                 if (assetsManager.assetsFileList.Count > 0)
                 {
                     yield return file;
@@ -367,7 +442,7 @@ namespace AnimeStudio
                         PathID = objectReader.m_PathID,
                         Type = objectReader.type,
                         Container = "",
-                        Hash = obj.GetHash(),
+                        Hash = ComputeHash ? obj.GetHash() : null,
                         Offset = assetsFile.offset
                     };
 

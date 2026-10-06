@@ -84,6 +84,31 @@ namespace AnimeStudio
             }
         }
 
+        /// <summary>
+        /// 给已经自己做过 split 合并/过滤的调用方用。
+        /// LoadFiles 每次都会 MergeSplitAssets 一遍，也就是把整个目录重新枚举一次；
+        /// 逐文件循环调用时这笔开销会乘以文件数，在大目录上非常可观。
+        /// </summary>
+        public void LoadFilesPreprocessed(params string[] files)
+        {
+            if (Silent)
+            {
+                Logger.Silent = true;
+                Progress.Silent = true;
+            }
+
+            var toReadFile = files;
+            if (ResolveDependencies)
+                toReadFile = AssetsHelper.ProcessDependencies(toReadFile);
+            Load(toReadFile);
+
+            if (Silent)
+            {
+                Logger.Silent = false;
+                Progress.Silent = false;
+            }
+        }
+
         public void LoadFolder(string path)
         {
             if (Silent)
@@ -457,7 +482,7 @@ namespace AnimeStudio
                     var total = stream.Length;
 
                     OffsetData.TryGetValue(reader.FileName, out var manualOffsets);
-                    bool isManualOffsets = (manualOffsets != null && manualOffsets.Count > 0) && Game.Type.IsArknightsEndfieldGroup();
+                    bool isManualOffsets = manualOffsets != null && manualOffsets.Count > 0;
                     IEnumerable<long> offsetsEnumerable = isManualOffsets
                         ? manualOffsets
                         : stream.GetOffsets(reader.FullPath);
