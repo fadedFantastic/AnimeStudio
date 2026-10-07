@@ -109,12 +109,14 @@ public sealed class ExplorerForm : Form
         menu.Items.Add("加入导出列表", null, (_, _) => AddToBasket());
         menu.Items.Add("复制资源路径", null, (_, _) => CopySelected(a => a.Container));
         menu.Items.Add("复制 blk 完整路径", null, (_, _) => CopySelected(a => a.Source));
+        menu.Items.Add("收集/导出所在资源目录…", null, (_, _) => OpenDirectoryExport());
         list.ContextMenuStrip = menu;
         var actions = Flow();
         actions.Controls.Add(Button("加入导出列表", () => { AddToBasket(); return Task.CompletedTask; }));
         actions.Controls.Add(Button("Load Selected", () => PerformAsync("load")));
         actions.Controls.Add(Button("导出选中资源…", () => PerformAsync("assets")));
         actions.Controls.Add(Button("一键导出 FBX + 动画 + 贴图…", () => PerformAsync("models")));
+        actions.Controls.Add(Button("目录批量导出…", () => { OpenDirectoryExport(); return Task.CompletedTask; }));
         var basketPanel = new Panel { Dock = DockStyle.Bottom, Height = 150, Padding = new Padding(8) };
         var basketBar = Flow();
         basketBar.Controls.Add(new Label { Text = "导出列表（跨搜索保留；非空时优先使用此列表）", AutoSize = true, Padding = new Padding(0, 7, 0, 0) });
@@ -249,6 +251,17 @@ public sealed class ExplorerForm : Form
         if (loaded) DialogResult = DialogResult.OK;
     }
     private CatalogAsset[] Selected() => store == null ? [] : list.SelectedIndices.Cast<int>().Where(i => i < view.Length).Select(i => store.Entry(view[i])).ToArray();
+    private void OpenDirectoryExport()
+    {
+        if (busy) return;
+        if (store == null) { Status("请先打开资源清单。"); return; }
+        var selectedDirectory = ResourcePaths.Parent(Selected().FirstOrDefault()?.Container);
+        var context = new CatalogRequest(Enum.Parse<GameType>(game.Text), [], cab.Text, root.Text) { MeshCatalog = store, ExportWorkers = settings.ExportWorkers };
+        using var dialog = new DirectoryExportForm(store, bridge, context,
+            string.IsNullOrEmpty(selectedDirectory) ? settings.ResourceDirectory : selectedDirectory, settings.ExportDirectory);
+        dialog.ShowDialog(this);
+        settings.ExportWorkers = dialog.ExportWorkers; settings.ResourceDirectory = dialog.ResourceDirectory; settings.ExportDirectory = dialog.ExportDirectory; SaveSettings();
+    }
     private void AddToBasket() { if (busy) return; foreach (var a in Selected()) if (!basket.Contains(a)) basket.Add(a); RefreshBasket(); }
     private void RefreshBasket() { basketView.Items.Clear(); basketView.Items.AddRange(basket.Select(a => $"{a.Type}  {a.Name}  · {Path.GetFileName(a.Source)} @ {a.Offset}").ToArray()); }
     private void CopySelected(Func<CatalogAsset, string> get) { var text = string.Join(Environment.NewLine, Selected().Select(get)); if (text.Length > 0) Clipboard.SetText(text); }

@@ -7,7 +7,9 @@ internal sealed class ExplorerSettings
     public string WorkDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AnimeStudio", "AssetExplorer");
     public string Catalog = "", SourceRoot = "", CabMap = "", DictionaryDirectory = "", ExportDirectory = "";
     public GameType Game = GameType.ZZZ;
+    public int ExportWorkers = 2;
     public bool Full;
+    public string ResourceDirectory = "";
     private static string SettingsPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AnimeStudio", "AssetExplorer", "settings.json");
     public static ExplorerSettings Load()
     {

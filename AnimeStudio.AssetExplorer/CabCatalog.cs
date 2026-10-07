@@ -7,6 +7,17 @@ public sealed class CabCatalog
 {
     public string Root { get; private set; }
     public List<CabEntry> Entries { get; } = [];
+    private Dictionary<string, CabEntry[]> names;
+    private Dictionary<string, CabEntry[]> locations;
+
+    private void BuildLookup()
+    {
+        if (names != null) return;
+        names = Entries.GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(x => x.Key, x => x.ToArray(), StringComparer.OrdinalIgnoreCase);
+        locations = Entries.GroupBy(x => x.Source, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(x => x.Key, x => x.ToArray(), StringComparer.OrdinalIgnoreCase);
+    }
 
     public static CabCatalog Read(string path, CancellationToken token)
     {
@@ -43,11 +54,11 @@ public sealed class CabCatalog
         }
     }
 
-    public static LoadPlan Plan(CatalogRequest request, CancellationToken token)
+    public static LoadPlan Plan(CatalogRequest request, CancellationToken token, CabCatalog cachedMap = null)
     {
         if (request.Assets.Length == 0) throw new InvalidOperationException("请先选择资源。");
         CabCatalog map = null;
-        if (!string.IsNullOrWhiteSpace(request.CabMap)) map = Read(request.CabMap, token);
+        if (!string.IsNullOrWhiteSpace(request.CabMap)) map = cachedMap ?? Read(request.CabMap, token);
         string Resolve(string source)
         {
             if (string.IsNullOrWhiteSpace(request.SourceRoot)) return Path.GetFullPath(source);
@@ -67,10 +78,9 @@ public sealed class CabCatalog
         var missing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (map != null)
         {
-            var names = map.Entries.GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(x => x.Key, x => x.ToArray(), StringComparer.OrdinalIgnoreCase);
-            var locations = map.Entries.GroupBy(x => Resolve(x.Source), StringComparer.OrdinalIgnoreCase)
-                .ToDictionary(x => x.Key, x => x.ToArray(), StringComparer.OrdinalIgnoreCase);
+            map.BuildLookup();
+            var names = map.names;
+            var locations = map.locations;
             var queue = new Queue<CabEntry>();
             var preferred = new Dictionary<string, CabEntry>(StringComparer.OrdinalIgnoreCase);
             void Prefer(CabEntry entry)
@@ -85,7 +95,7 @@ public sealed class CabCatalog
             {
                 token.ThrowIfCancellationRequested();
                 var row = selected[selectedIndex];
-                var cabs = locations.GetValueOrDefault(row.Source) ?? [];
+                var cabs = locations.GetValueOrDefault(Path.GetFullPath(request.Assets[selectedIndex].Source)) ?? [];
                 var matches = cabs.Where(c => (row.Offset < 0 || c.Offset == row.Offset) &&
                     (string.IsNullOrEmpty(row.Cab) || c.Name.Equals(row.Cab, StringComparison.OrdinalIgnoreCase))).ToArray();
                 if (matches.Length == 0)

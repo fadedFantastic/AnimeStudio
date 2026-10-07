@@ -230,6 +230,36 @@ internal sealed class AssetIndexStore : IMeshCatalog
     }
 
     public sealed record Query(string Text, string Type, string Blk, bool UseRegex);
+    public DirectoryExportPlan CollectDirectory(string directory, bool recursive, CancellationToken token)
+    {
+        directory = ResourcePaths.Normalize(directory);
+        var groups = new Dictionary<string, List<CatalogAsset>>(StringComparer.OrdinalIgnoreCase);
+        var matched = 0;
+        for (var i = 0; i < Count; i++)
+        {
+            if ((i & 255) == 0) token.ThrowIfCancellationRequested();
+            var container = Container[i].Replace('\\', '/');
+            if (!ResourcePaths.IsWithin(container, directory, recursive)) continue;
+            container = ResourcePaths.Normalize(container);
+            if (!groups.TryGetValue(container, out var members)) groups[container] = members = [];
+            members.Add(Entry(i) with { Container = container });
+            matched++;
+        }
+        var result = new List<PrimaryAssetGroup>();
+        var unique = 0;
+        foreach (var group in groups.OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            token.ThrowIfCancellationRequested();
+            // Prefer one complete physical copy, but preserve unique subassets spread across files.
+            var copies = group.Value.GroupBy(a => (a.Source.ToUpperInvariant(), a.Offset))
+                .OrderByDescending(g => g.Count()).ThenBy(g => g.Key.Item1, StringComparer.Ordinal).ThenBy(g => g.Key.Offset);
+            var members = copies.SelectMany(g => g).DistinctBy(a => (a.Type, a.PathID, a.Name)).ToArray();
+            unique += members.Length;
+            result.Add(new PrimaryAssetGroup(group.Key, members));
+        }
+        return new DirectoryExportPlan(directory, recursive, result.ToArray(), matched, matched - unique);
+    }
+
     public IReadOnlyDictionary<string, CatalogAsset[]> FindMeshes(IEnumerable<string> paths, CancellationToken token)
     {
         var requested = paths.Select(p => p.Replace('\\', '/')).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();

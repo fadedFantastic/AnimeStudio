@@ -9,7 +9,7 @@ public static class SeparateMeshSupport
     internal sealed record Binding(CatalogAsset Component, string Path);
 
     public static int CompleteLoad(AssetsManager manager, CatalogRequest request, CatalogAsset[] selected,
-        Action<string> report, CancellationToken token)
+        Action<string> report, CancellationToken token, CabCatalog cachedMap = null)
     {
         if (!request.Game.IsZZZGroup()) return 0;
         var bindings = FindBindings(manager, selected, token);
@@ -34,7 +34,7 @@ public static class SeparateMeshSupport
         if (missing.Count > 0)
             throw new InvalidDataException($"模型骨架已加载，但清单缺少 {missing.Count} 个分离网格，请更新或打开完整清单：\n" + string.Join("\n", missing.Take(6)));
         var extras = chosen.Values.Distinct().ToArray();
-        var combined = CabCatalog.Plan(request with { Assets = request.Assets.Concat(extras).ToArray() }, token);
+        var combined = CabCatalog.Plan(request with { Assets = request.Assets.Concat(extras).ToArray() }, token, cachedMap);
         if (combined.Missing.Length > 0) throw new FileNotFoundException(string.Join(Environment.NewLine, combined.Missing.Take(12)));
         token.ThrowIfCancellationRequested();
         // ReadAssets processes the entire file list, so reload once instead of appending duplicate objects.

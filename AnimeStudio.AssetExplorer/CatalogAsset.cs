@@ -19,6 +19,7 @@ public interface IMeshCatalog
 
 public sealed record CatalogRequest(GameType Game, CatalogAsset[] Assets, string CabMap, string SourceRoot)
 {
+    public int ExportWorkers { get; init; } = 2;
     [Newtonsoft.Json.JsonIgnore]
     public IMeshCatalog MeshCatalog { get; init; }
 }
@@ -28,4 +29,6 @@ public interface IStudioBridge
     Task LoadAsync(CatalogRequest request, CancellationToken token);
     Task<string> ExportAssetsAsync(CatalogRequest request, string folder, CancellationToken token);
     Task<string> ExportModelsAsync(CatalogRequest request, string folder, CancellationToken token);
+    Task<DirectoryExportResult> ExportDirectoryAsync(DirectoryExportPlan plan, CatalogRequest context, string folder,
+        Action<string> report, CancellationToken token);
 }

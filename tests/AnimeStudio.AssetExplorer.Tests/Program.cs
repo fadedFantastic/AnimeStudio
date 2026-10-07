@@ -33,6 +33,40 @@ if (args.FirstOrDefault() == "--layout")
     Check(true, "Explorer form renders"); return;
 }
 
+if (args.FirstOrDefault() == "--directory-layout")
+{
+    Exception failure = null;
+    var thread = new Thread(() =>
+    {
+        try
+        {
+            System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.SystemAware);
+            System.Windows.Forms.Application.EnableVisualStyles();
+            var builder = new AssetIndexStore.Builder();
+            builder.Add(new CatalogAsset { Name = "Hero", Type = ClassIDType.Animator, Source = "demo.blk", Container = "Assets/Characters/Hero/Model/Hero.fbx", PathID = 1 });
+            builder.Add(new CatalogAsset { Name = "Idle", Type = ClassIDType.AnimationClip, Source = "demo.blk", Container = "Assets/Characters/Hero/Animation/Idle.fbx", PathID = 2 });
+            builder.Add(new CatalogAsset { Name = "Walk", Type = ClassIDType.AnimationClip, Source = "demo.blk", Container = "Assets/Characters/Hero/Animation/Walk.fbx", PathID = 3 });
+            var catalog = builder.Build(GameType.ZZZ, "fixture");
+            using var form = new DirectoryExportForm(catalog, new PreviewBridge(), new(GameType.ZZZ, [], "", ""), "Assets/Characters/Hero", output)
+                { Opacity = 0, ShowInTaskbar = false };
+            form.Show();
+            var button = form.Controls.OfType<System.Windows.Forms.FlowLayoutPanel>().SelectMany(p => p.Controls.OfType<System.Windows.Forms.Button>()).Single(b => b.Text == "收集目录");
+            button.PerformClick();
+            var timer = Stopwatch.StartNew();
+            while (!button.Enabled && timer.ElapsedMilliseconds < 5000) { System.Windows.Forms.Application.DoEvents(); Thread.Sleep(5); }
+            Check(form.Controls.OfType<System.Windows.Forms.ListView>().Single().VirtualListSize == 3, "directory dialog collects and previews primary resources");
+            form.PerformLayout();
+            using var bitmap = new System.Drawing.Bitmap(form.Width, form.Height);
+            form.DrawToBitmap(bitmap, new System.Drawing.Rectangle(0, 0, form.Width, form.Height));
+            bitmap.Save(Path.Combine(output, "directory.png"));
+        }
+        catch (Exception ex) { failure = ex; }
+    });
+    thread.SetApartmentState(ApartmentState.STA); thread.Start(); thread.Join();
+    if (failure != null) throw failure;
+    return;
+}
+
 if (args.FirstOrDefault() == "--benchmark")
 {
     var timer = Stopwatch.StartNew();
@@ -58,6 +92,79 @@ if (args.FirstOrDefault() == "--catalog-find")
     File.WriteAllText(Path.Combine(output, "matches.json"), JsonConvert.SerializeObject(rows, Formatting.Indented));
     Console.WriteLine($"MATCHES {rows.Length}: " + string.Join(", ", rows.GroupBy(r => r.Type).Select(g => $"{g.Key}={g.Count()}")));
     foreach (var row in rows.Take(12)) Console.WriteLine(JsonConvert.SerializeObject(row));
+    return;
+}
+
+if (args.FirstOrDefault() == "--worker-crash")
+{
+    var gui = System.Reflection.Assembly.LoadFrom(args[2]);
+    var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public;
+    var bridgeType = gui.GetType("AnimeStudio.GUI.MainForm+ExplorerBridge", true);
+    var options = bridgeType.GetMethod("GetModelOptions", flags | System.Reflection.BindingFlags.Static).Invoke(null, null);
+    var clientType = gui.GetType("AnimeStudio.GUI.DirectoryExportWorker+Client", true);
+    var client = Activator.CreateInstance(clientType, flags | System.Reflection.BindingFlags.Instance, null,
+        new object[] { new CatalogRequest(GameType.ZZZ, [], args[3], ""), options }, null);
+    var exportMethod = clientType.GetMethod("ExportAsync", flags | System.Reflection.BindingFlags.Instance);
+    var processField = clientType.GetField("process", flags | System.Reflection.BindingFlags.Instance);
+    Task<PrimaryExportResult> Begin() => (Task<PrimaryExportResult>)exportMethod.Invoke(client,
+        new object[] { new PrimaryAssetGroup("Assets/Test/missing.fbx", []), output, CancellationToken.None });
+    try
+    {
+        var first = Begin();
+        var worker = (Process)processField.GetValue(client);
+        Check(worker != null, "worker process started");
+        worker.Kill(entireProcessTree: true);
+        try { await first.WaitAsync(TimeSpan.FromSeconds(15)); throw new Exception("crash accepted"); }
+        catch (IOException ex) { Check(ex.Message.Contains("意外退出"), "worker crash returns an error without hanging"); }
+        try { await Begin().WaitAsync(TimeSpan.FromSeconds(30)); throw new Exception("empty fixture accepted"); }
+        catch (IOException ex) { Check(!ex.Message.Contains("意外退出"), "replacement worker starts and processes the next job"); }
+    }
+    finally { ((IDisposable)client).Dispose(); }
+    return;
+}
+
+if (args.FirstOrDefault() is "--directory" or "--directory-origin")
+{
+    var store = AssetIndexStore.Load(args[2], output, Console.WriteLine, default);
+    var plan = store.CollectDirectory(args[3], true, default);
+    if (args[0] == "--directory-origin") plan = plan with { Groups = plan.Groups.Where(g => g.ResourcePath.EndsWith("Remielle_Origin_Model.fbx")).ToArray() };
+    Console.WriteLine($"DIRECTORY {plan.Groups.Length} primary files, {plan.MatchedRows} rows, {plan.DuplicateRows} duplicate rows");
+    File.WriteAllText(Path.Combine(output, "collection.json"), JsonConvert.SerializeObject(plan, Formatting.Indented));
+    if (args.Length > 4)
+    {
+        Logger.Silent = true;
+        var gui = System.Reflection.Assembly.LoadFrom(args[5]);
+        var bridgeType = gui.GetType("AnimeStudio.GUI.MainForm+ExplorerBridge", true);
+        var bridge = (IStudioBridge)Activator.CreateInstance(bridgeType,
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance,
+            null, new object[] { null }, null);
+        var context = new CatalogRequest(store.Game, [], args[4], "") { MeshCatalog = store, ExportWorkers = args.Length > 6 ? int.Parse(args[6]) : 2 };
+        var exportTimer = Stopwatch.StartNew();
+        using var exportCancellation = new CancellationTokenSource();
+        if (args.Length > 7) exportCancellation.CancelAfter(int.Parse(args[7]));
+        var result = await bridge.ExportDirectoryAsync(plan, context, output, Console.WriteLine, exportCancellation.Token);
+        Console.WriteLine($"EXPORT BENCH workers={context.ExportWorkers} seconds={exportTimer.Elapsed.TotalSeconds:F2}");
+        File.WriteAllText(Path.Combine(output, "directory-result.json"), JsonConvert.SerializeObject(result, Formatting.Indented));
+        if (args.Length > 7)
+        {
+            Check(result.Cancelled && result.Pending > 0 && result.Failed == 0, "real worker cancellation returns unfinished resources without reporting failures");
+            return;
+        }
+        Check(result.Succeeded == plan.Groups.Length && result.Failed == 0, "every primary resource in the real directory exported");
+        var manifest = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(Path.Combine(result.OutputDirectory, "export-manifest.json")));
+        foreach (var item in manifest["Items"])
+        {
+            var path = (string)item["ResourcePath"];
+            if (!path.EndsWith(".fbx", StringComparison.OrdinalIgnoreCase)) continue;
+            Check(item["MainFiles"].Count() == 1, "one main FBX per resource path: " + path);
+            var file = Path.Combine(result.OutputDirectory, (string)item["MainFiles"][0]);
+            var details = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(Path.Combine(Path.GetDirectoryName(file), "primary-resource.json")));
+            var expected = plan.Groups.Single(g => g.ResourcePath == path).Members.Where(a => a.Type == ClassIDType.AnimationClip).Select(a => a.Name).ToArray();
+            Check(expected.All(name => details["Animations"].Values<string>().Contains(name)), "subanimations embedded in their own FBX");
+            Check(!Directory.EnumerateFiles(Path.GetDirectoryName(file), "*.anim", SearchOption.AllDirectories).Any(), "no loose subasset animations");
+            if (expected.Length > 0) Check(Encoding.ASCII.GetString(File.ReadAllBytes(file)).Contains("AnimationStack"), "FBX contains actual animation stacks");
+        }
+    }
     return;
 }
 
@@ -215,6 +322,88 @@ foreach (var formatting in new[] { Formatting.None, Formatting.Indented })
     catch (OperationCanceledException) { Check(true, "search cancellation"); }
 }
 var sourceRoot = Path.Combine(output, "relocated"); Directory.CreateDirectory(sourceRoot);
+var directoryBuilder = new AssetIndexStore.Builder();
+foreach (var asset in new[]
+{
+    new CatalogAsset { Name = "Hero", Type = ClassIDType.Animator, PathID = 1, Source = @"E:\a.blk", Offset = 10, Container = "Assets/Hero/a.fbx" },
+    new CatalogAsset { Name = "Walk", Type = ClassIDType.AnimationClip, PathID = 2, Source = @"E:\a.blk", Offset = 10, Container = "Assets/Hero/a.fbx" },
+    new CatalogAsset { Name = "Run", Type = ClassIDType.AnimationClip, PathID = 3, Source = @"E:\a.blk", Offset = 10, Container = "Assets/Hero/a.fbx" },
+    new CatalogAsset { Name = "Walk", Type = ClassIDType.AnimationClip, PathID = 2, Source = @"E:\copy.blk", Offset = 0, Container = "Assets/Hero/a.fbx" },
+    new CatalogAsset { Name = "Walk", Type = ClassIDType.AnimationClip, PathID = 2, Source = @"E:\b.blk", Container = "Assets/Hero/sub/b.fbx" },
+    new CatalogAsset { Name = "Outside", Type = ClassIDType.Texture2D, PathID = 1, Source = @"E:\x.blk", Container = "Assets/Heroine/a.png" },
+    new CatalogAsset { Name = "Unknown", Type = ClassIDType.Mesh, PathID = 4, Source = @"E:\x.blk", Container = "1234" }
+}) directoryBuilder.Add(asset);
+var directoryStore = directoryBuilder.Build(GameType.ZZZ, "fixture");
+directoryStore.Guessed = new string[directoryStore.Count]; directoryStore.Guessed[^1] = "Assets/Hero/guessed.mesh";
+var directoryPlan = directoryStore.CollectDirectory(@"assets\Hero\", true, default);
+Check(directoryPlan.Groups.Length == 2 && directoryPlan.DuplicateRows == 1, "directory boundaries, slash normalization and duplicate copies");
+Check(directoryPlan.Groups[0].Members.Length == 3 && directoryPlan.Groups[1].Members.Length == 1, "subassets group by parent path; same-name clips in other FBXs stay separate");
+Check(directoryStore.CollectDirectory("Assets/Hero", false, default).Groups.Length == 1, "nonrecursive directory collection");
+Check(directoryPlan.MatchedRows == 5, "guessed paths do not determine directory membership");
+try { ResourcePaths.Normalize("Assets/Hero/../other"); throw new Exception("Traversal accepted"); } catch (ArgumentException) { Check(true, "resource traversal rejected"); }
+Check(ResourcePaths.OutputDirectory(output, "Assets/Hero", "Assets/Hero/A:B.fbx") != ResourcePaths.OutputDirectory(output, "Assets/Hero", "Assets/Hero/A?B.fbx"), "sanitized filenames cannot collide");
+var visits = 0;
+var batch = await DirectoryExportService.RunAsync(directoryPlan, output, (group, folder, token) =>
+{
+    visits++;
+    if (visits == 1) throw new InvalidDataException("fixture failure");
+    var file = Path.Combine(folder, "main.fbx"); File.WriteAllText(file, "fixture");
+    return Task.FromResult(new PrimaryExportResult([file], 1));
+}, null, default);
+Check(visits == 2 && batch.Failed == 1 && batch.Succeeded == 1 && batch.Pending == 0, "batch continues after one failed primary resource");
+var batchManifest = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(Path.Combine(batch.OutputDirectory, "export-manifest.json")));
+Check((string)batchManifest["State"] == "partial", "batch manifest never reports partial export as complete");
+using (var cancelBatch = new CancellationTokenSource())
+{
+    var progressCount = 0;
+    var cancelled = await DirectoryExportService.RunAsync(directoryPlan, output, (group, folder, token) =>
+    {
+        token.ThrowIfCancellationRequested();
+        var file = Path.Combine(folder, "main.fbx"); File.WriteAllText(file, "fixture");
+        return Task.FromResult(new PrimaryExportResult([file]));
+    }, _ => { if (++progressCount == 1) cancelBatch.Cancel(); }, cancelBatch.Token);
+    Check(cancelled.Cancelled && cancelled.Succeeded == 1 && cancelled.Pending == 1, "cancellation preserves completed primary exports and records unfinished resources");
+}
+// Two blocked delegates must both start before either can finish: verifies actual overlap.
+var parallelPlan = new DirectoryExportPlan("Assets/Test", true,
+    Enumerable.Range(0, 8).Select(i => new PrimaryAssetGroup($"Assets/Test/{i}.asset", [])).ToArray(), 8, 0);
+var bothStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+int activeExports = 0, peakExports = 0, startedExports = 0;
+var parallelBatch = await DirectoryExportService.RunAsync(parallelPlan, output, async (group, folder, token) =>
+{
+    var active = Interlocked.Increment(ref activeExports);
+    InterlockedExtensionsMax(active);
+    if (Interlocked.Increment(ref startedExports) == 2) bothStarted.TrySetResult();
+    try
+    {
+        await bothStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        await Task.Delay(15, token);
+        if (group.ResourcePath.EndsWith("3.asset")) throw new IOException("fixture failure");
+        var file = Path.Combine(folder, "main.bin"); await File.WriteAllTextAsync(file, "fixture", token);
+        return new PrimaryExportResult([file]);
+    }
+    finally { Interlocked.Decrement(ref activeExports); }
+}, null, default, 2);
+void InterlockedExtensionsMax(int value)
+{
+    int before;
+    do { before = peakExports; if (before >= value) return; }
+    while (Interlocked.CompareExchange(ref peakExports, value, before) != before);
+}
+Check(peakExports == 2 && parallelBatch.Succeeded == 7 && parallelBatch.Failed == 1, "bounded parallel exports overlap and continue after failures");
+Check(File.ReadAllLines(Path.Combine(parallelBatch.OutputDirectory, "results.jsonl")).Length == 8, "parallel journal has exactly one result per primary resource");
+using (var cancelParallel = new CancellationTokenSource())
+{
+    int running = 0;
+    var cancelled = await DirectoryExportService.RunAsync(parallelPlan, output, async (group, folder, token) =>
+    {
+        if (Interlocked.Increment(ref running) == 2) cancelParallel.Cancel();
+        await Task.Delay(Timeout.Infinite, token);
+        return new PrimaryExportResult([]);
+    }, null, cancelParallel.Token, 2);
+    Check(cancelled.Cancelled && cancelled.Pending == 8 && cancelled.Succeeded == 0 && running == 2,
+        "cancellation stops all active exports and does not start queued items");
+}
 var meshPath = "Assets/OriginalResRepos/ART/DiscreteMeshAssets/Hero_Origin_Model/Body.mesh";
 var otherMeshPath = "Assets/OriginalResRepos/ART/DiscreteMeshAssets/Hero_Other_Model/Body.mesh";
 var meshBuilder = new AssetIndexStore.Builder();
@@ -269,4 +458,6 @@ sealed class PreviewBridge : IStudioBridge
     public Task LoadAsync(CatalogRequest request, CancellationToken token) => Task.CompletedTask;
     public Task<string> ExportAssetsAsync(CatalogRequest request, string folder, CancellationToken token) => Task.FromResult("");
     public Task<string> ExportModelsAsync(CatalogRequest request, string folder, CancellationToken token) => Task.FromResult("");
+    public Task<DirectoryExportResult> ExportDirectoryAsync(DirectoryExportPlan plan, CatalogRequest context, string folder, Action<string> report, CancellationToken token)
+        => Task.FromResult(new DirectoryExportResult(folder, 0, 0, plan.Groups.Length, false));
 }

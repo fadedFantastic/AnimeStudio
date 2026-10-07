@@ -26,7 +26,7 @@ partial class MainForm
         explorer.ShowDialog(this);
     }
 
-    private sealed class ExplorerBridge(MainForm form) : IStudioBridge
+    internal sealed class ExplorerBridge(MainForm form) : IStudioBridge
     {
         private async Task<LoadPlan> Load(CatalogRequest request, bool requireDependencies, CancellationToken token)
         {
@@ -98,8 +98,77 @@ partial class MainForm
         public async Task<string> ExportModelsAsync(CatalogRequest request, string folder, CancellationToken token)
         {
             var plan = await Load(request, true, token);
+            var options = GetModelOptions();
+            try
+            {
+                var result = await Task.Run(() => ModelExportService.Export(Studio.assetsManager, plan.Selected,
+                    folder, options, Logger.Info, token), token);
+                return $"已导出 {result.Count} 个 FBX，包含 {result.Sum(x => x.Animations.Length)} 段动画、{result.Sum(x => x.Textures.Length)} 张贴图。目录：{folder}";
+            }
+            finally { await form.BuildAssetStructures(plan.Files); }
+        }
+
+        public Task<DirectoryExportResult> ExportDirectoryAsync(DirectoryExportPlan plan, CatalogRequest context,
+            string folder, Action<string> report, CancellationToken token)
+            => DirectoryExportWorker.ExportAsync(plan, context, folder, GetModelOptions(), report, token);
+
+        internal static PrimaryExportResult ExportPrimaryObject(PrimaryAssetGroup group, PrimaryAssetContent content,
+            string output, CancellationToken token)
+        {
+            if (content.Main == null) throw new InvalidDataException("没有找到主资源对象。");
+            var members = content.Members;
+            var mainFiles = new List<string>();
+            if (members.Length == 1 && content.Main is not GameObject and not MonoBehaviour)
+            {
+                var item = new AssetItem(content.Main) { Text = ResourcePaths.SafeSegment(Path.GetFileNameWithoutExtension(group.ResourcePath)) };
+                if (!Exporter.ExportConvertFile(item, output + Path.DirectorySeparatorChar))
+                    if (!Exporter.ExportRawFile(item, output + Path.DirectorySeparatorChar)) throw new IOException("主资源未能导出。");
+                mainFiles.AddRange(Directory.GetFiles(output).Where(p => Path.GetFileName(p) != "export-incomplete.txt"));
+            }
+            else
+            {
+                // Composite Unity assets have no general native-file writer. Preserve the primary
+                // object and all its subasset data in one JSON document instead of scattering them.
+                var file = Path.Combine(output, ResourcePaths.SafeSegment(Path.GetFileName(group.ResourcePath)) + ".json");
+                using var text = File.CreateText(file);
+                using var writer = new JsonTextWriter(text) { Formatting = Formatting.Indented };
+                var serializer = new JsonSerializer();
+                writer.WriteStartObject();
+                writer.WritePropertyName("ResourcePath"); writer.WriteValue(group.ResourcePath);
+                writer.WritePropertyName("MainPathID"); writer.WriteValue(content.Main.m_PathID);
+                writer.WritePropertyName("Assets"); writer.WriteStartArray();
+                foreach (var asset in members)
+                {
+                    token.ThrowIfCancellationRequested();
+                    writer.WriteStartObject();
+                    writer.WritePropertyName("PathID"); writer.WriteValue(asset.m_PathID);
+                    writer.WritePropertyName("Type"); writer.WriteValue(asset.type.ToString());
+                    writer.WritePropertyName("Name"); writer.WriteValue(asset.Name);
+                    writer.WritePropertyName("Source"); serializer.Serialize(writer, PrimaryAssetResolver.Reference(asset));
+                    writer.WritePropertyName("Data"); serializer.Serialize(writer, (object)asset.ToType() ?? asset);
+                    writer.WritePropertyName("RawData"); writer.WriteValue(Convert.ToBase64String(asset.GetRawData()));
+                    byte[] payload = asset switch
+                    {
+                        Texture2D texture => texture.image_data.GetData(),
+                        AudioClip audio => audio.m_AudioData.GetData(),
+                        VideoClip video => video.m_VideoData.GetData(),
+                        _ => null
+                    };
+                    if (payload != null) { writer.WritePropertyName("ResourceData"); writer.WriteValue(payload); }
+                    writer.WriteEndObject();
+                }
+                writer.WriteEndArray(); writer.WriteEndObject();
+                mainFiles.Add(file);
+            }
+            File.WriteAllText(Path.Combine(output, "primary-resource.json"), JsonConvert.SerializeObject(new
+                { group.ResourcePath, SubAssets = group.Members, MainFiles = mainFiles.Select(Path.GetFileName).ToArray() }, Formatting.Indented));
+            return new(mainFiles.ToArray());
+        }
+
+        private static ModelExportService.Options GetModelOptions()
+        {
             var settings = Properties.Settings.Default;
-            var options = new ModelExportService.Options(new ModelConverter.Options
+            return new ModelExportService.Options(new ModelConverter.Options
             {
                 imageFormat = ImageFormat.Png, collectAnimations = true, exportMaterials = true,
                 uvs = JsonConvert.DeserializeObject<Dictionary<string, (bool, int)>>(settings.uvs),
@@ -112,13 +181,6 @@ partial class MainForm
                 boneSize = (int)settings.boneSize, scaleFactor = (float)settings.scaleFactor,
                 fbxVersion = settings.fbxVersion, fbxFormat = settings.fbxFormat
             });
-            try
-            {
-                var result = await Task.Run(() => ModelExportService.Export(Studio.assetsManager, plan.Selected,
-                    folder, options, Logger.Info, token), token);
-                return $"已导出 {result.Count} 个 FBX，包含 {result.Sum(x => x.Animations.Length)} 段动画、{result.Sum(x => x.Textures.Length)} 张贴图。目录：{folder}";
-            }
-            finally { await form.BuildAssetStructures(plan.Files); }
         }
     }
 }
