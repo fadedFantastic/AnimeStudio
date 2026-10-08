@@ -179,6 +179,11 @@ namespace AnimeStudio.FbxInterop
                     frameStack.Push(frame[i]);
                 }
             }
+
+            // BoneInPath also marks the parent as a joint, so restore the scene container
+            // after visiting the children. Unity keeps a skeleton root as an extra path segment.
+            if (_exportOptions.preserveRootNodeAsNull && _frameToNode.TryGetValue(rootFrame, out var rootNode))
+                AsFbxSetJointsNode_Generic(_pContext, rootNode);
         }
 
         internal void PrepareMaterials(int materialCount, int textureCount)

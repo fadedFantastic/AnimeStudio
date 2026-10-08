@@ -42,6 +42,15 @@ ZZZ 的部分原始模型（例如 `Avatar_Female_Size02_Remielle_Origin_Model.f
 
 并发验收（2026-10-07）：Remielle/UIAni 的 44 个 FBX，单进程约 170 秒、双进程约 110 秒，耗时减少约 35%。两次运行的主资源路径、子动画清单、网格数和输出文件清单一致，均检查 FBX 中实际存在 AnimationStack。此为本机数据，受磁盘缓存、资源大小和其他负载影响；双进程测试使用 .NET 9 构建在 .NET 10 运行时上运行，单进程使用 .NET 10 构建。回归覆盖并发上限、日志一致性、失败继续、取消全部活动任务；实际进程测试验证取消和工作进程异常退出后重建。
 
+## Unity 动画根节点兼容
+
+动画 FBX 的外层场景容器现在保留为 Null 节点，子骨骼继续导出为骨骼节点。
+先前无网格动画会把外层容器一并转成骨骼，Unity 保留它后，曲线路径多出 `Avatar_…_Ani_…/`，无法匹配模型的 `Bone_Root/…`。
+本次通过可选的 `preserveRootNodeAsNull` 修复 Asset Explorer 的导出；上游普通导出的默认行为不变，无需修改原生 FBX DLL。
+旧动画文件需要重新导出。动画文件本身没有网格时，Unity 预览需要指定对应的模型。
+
+验收：Unity 2022.3.61f1 中主攻击动画的 389 条节点路径全部匹配模型，采样时 350 个节点发生运动，四段子动画均通过绑定检查。回归检查验证 FBX 根节点类型和动画保留。`tests/UnityFbxValidation/Editor/FbxPlaybackValidation.cs` 可放入临时 Unity 工程复验实际导入与播放。
+
 ## 索引与路径
 
 - 首次导入大清单会生成压缩二进制缓存；之后按源文件路径、大小和修改时间验证缓存。表格采用 ListView VirtualMode，不为数百万条结果创建 UI 行对象。

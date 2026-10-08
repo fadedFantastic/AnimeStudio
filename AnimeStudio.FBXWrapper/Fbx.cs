@@ -62,6 +62,8 @@ namespace AnimeStudio
             public bool exportAnimations;
             public bool exportBlendShape;
             public bool castToBone;
+            // Opt-in for consumers that bind separately exported animations by relative paths.
+            public bool preserveRootNodeAsNull;
             public int boneSize;
             public float scaleFactor;
             public int fbxVersion;

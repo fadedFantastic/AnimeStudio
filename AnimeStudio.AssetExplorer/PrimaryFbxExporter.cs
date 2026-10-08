@@ -30,7 +30,7 @@ public static class PrimaryFbxExporter
         Directory.CreateDirectory(folder);
         var file = Path.Combine(folder, ResourcePaths.SafeSegment(name) + ".fbx");
         ExportNative(file, model, options.Fbx with { exportAllNodes = true, exportAnimations = true,
-            exportSkins = true, castToBone = model.MeshList.Count == 0 || options.Fbx.castToBone }, token);
+            exportSkins = true, preserveRootNodeAsNull = true, castToBone = model.MeshList.Count == 0 || options.Fbx.castToBone }, token);
 
         // Keep dynamic material dependencies alongside the main file; subanimations stay inside the FBX.
         var materials = manager.assetsFileList.SelectMany(f => f.Objects.OfType<Material>()).ToArray();

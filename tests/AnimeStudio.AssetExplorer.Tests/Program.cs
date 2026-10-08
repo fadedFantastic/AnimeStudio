@@ -321,6 +321,16 @@ foreach (var formatting in new[] { Formatting.None, Formatting.Indented })
     try { store.Search(new("m", "", "", false), cts.Token); throw new Exception("cancel ignored"); }
     catch (OperationCanceledException) { Check(true, "search cancellation"); }
 }
+var fixture = new AnimationFbxFixture();
+foreach (var preserve in new[] { false, true })
+{
+    var file = Path.Combine(output, preserve ? "fixed-animation.fbx" : "legacy-animation.fbx");
+    Fbx.Exporter.Export(file, fixture, new Fbx.ExportOptions { exportAllNodes = true, exportSkins = true, exportAnimations = true,
+        castToBone = true, preserveRootNodeAsNull = preserve, boneSize = 10, scaleFactor = 1, fbxVersion = 3, fbxFormat = 0 });
+    var inspected = FbxInspection.Read(file);
+    Check(inspected.Roots.Single().Type == (preserve ? "Null" : "LimbNode"), "native FBX root classification with opt-in=" + preserve);
+    Check(inspected.Models.Single(m => m.Name == "Bip001").Type == "LimbNode" && inspected.Animations.Contains("Attack"), "root fix preserves skeleton bones and animation stacks");
+}
 var sourceRoot = Path.Combine(output, "relocated"); Directory.CreateDirectory(sourceRoot);
 var directoryBuilder = new AssetIndexStore.Builder();
 foreach (var asset in new[]
