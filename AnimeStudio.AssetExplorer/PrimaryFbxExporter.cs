@@ -28,7 +28,7 @@ public static class PrimaryFbxExporter
         Directory.CreateDirectory(folder);
         var file = Path.Combine(folder, Path.ChangeExtension(ResourcePaths.OutputSegment(Path.GetFileName(group.ResourcePath)), ".fbx"));
         ExportNative(file, model, options.Fbx with { exportAllNodes = true, exportAnimations = true,
-            exportSkins = true, preserveRootNodeAsNull = true,
+            exportSkins = true, preserveRootNodeAsNull = true, optimizeAnimationSize = true,
             castToBone = model.MeshList.Count == 0 || options.Fbx.castToBone }, token);
 
         // Native FBX materials and their referenced textures are already exported together.

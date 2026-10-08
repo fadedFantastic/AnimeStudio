@@ -50,6 +50,8 @@ namespace AnimeStudio
                 }
 
                 Directory.SetCurrentDirectory(currentDir);
+                if (exportOptions.optimizeAnimationSize && imported.AnimationList?.Count > 0)
+                    FbxBinaryOptimizer.Optimize(file.FullName);
             }
         }
 
@@ -64,6 +66,7 @@ namespace AnimeStudio
             public bool castToBone;
             // Opt-in for consumers that bind separately exported animations by relative paths.
             public bool preserveRootNodeAsNull;
+            public bool optimizeAnimationSize;
             public int boneSize;
             public float scaleFactor;
             public int fbxVersion;

@@ -56,7 +56,7 @@ public static class ModelExportService
             File.WriteAllText(incomplete, "导出尚未完成；完成后此文件会自动移除。若任务失败或取消，请查看 Asset Explorer 中的错误信息。");
             var fbx = Path.Combine(folder, SafeName(root.m_Name) + ".fbx");
             var cwd = Environment.CurrentDirectory;
-            try { ModelExporter.ExportFbx(fbx, model, options.Fbx with { exportAnimations = true, exportSkins = true, preserveRootNodeAsNull = true }); }
+            try { ModelExporter.ExportFbx(fbx, model, options.Fbx with { exportAnimations = true, exportSkins = true, preserveRootNodeAsNull = true, optimizeAnimationSize = true }); }
             finally { Environment.CurrentDirectory = cwd; }
             if (!File.Exists(fbx) || new FileInfo(fbx).Length == 0) throw new IOException("FBX 导出器没有生成文件：" + fbx);
             var materialFolder = Path.Combine(folder, "Materials");

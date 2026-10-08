@@ -11,6 +11,21 @@ var output = Path.GetFullPath(args.Length > 1 ? args[1] : "asset-explorer-test-o
 Directory.CreateDirectory(output);
 void Check(bool value, string message) { if (!value) throw new Exception(message); Console.WriteLine("PASS " + message); }
 
+if (args.FirstOrDefault() == "--optimize-fbx")
+{
+    var target = Path.Combine(output, Path.GetFileName(args[2]));
+    File.Copy(args[2], target, false);
+    var result = FbxBinaryOptimizer.Optimize(target);
+    Console.WriteLine(JsonConvert.SerializeObject(result));
+    var before = FbxInspection.Read(args[2]); var after = FbxInspection.Read(target);
+    Check(before.Models.SequenceEqual(after.Models) && before.Animations.SequenceEqual(after.Animations), "optimization retains all models and all animation takes");
+    Check(result.OptimizedBytes < result.OriginalBytes, "real FBX became smaller");
+    var hash = System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(target));
+    FbxBinaryOptimizer.Optimize(target);
+    Check(hash.SequenceEqual(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(target))), "lossless compaction is idempotent");
+    return;
+}
+
 if (args.FirstOrDefault() == "--layout")
 {
     Exception failure = null;
@@ -358,6 +373,7 @@ foreach (var preserve in new[] { false, true })
     Check(inspected.Models.Single(m => m.Name == "Bip001").Type == "LimbNode" && inspected.Animations.Contains("Attack"), "root fix preserves skeleton bones and animation stacks");
 }
 var sourceRoot = Path.Combine(output, "relocated"); Directory.CreateDirectory(sourceRoot);
+FbxOptimizationTests.Run(output, Check);
 var directoryBuilder = new AssetIndexStore.Builder();
 foreach (var asset in new[]
 {
