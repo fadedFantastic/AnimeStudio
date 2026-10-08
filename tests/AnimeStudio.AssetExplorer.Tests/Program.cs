@@ -46,15 +46,25 @@ if (args.FirstOrDefault() == "--directory-layout")
             builder.Add(new CatalogAsset { Name = "Hero", Type = ClassIDType.Animator, Source = "demo.blk", Container = "Assets/Characters/Hero/Model/Hero.fbx", PathID = 1 });
             builder.Add(new CatalogAsset { Name = "Idle", Type = ClassIDType.AnimationClip, Source = "demo.blk", Container = "Assets/Characters/Hero/Animation/Idle.fbx", PathID = 2 });
             builder.Add(new CatalogAsset { Name = "Walk", Type = ClassIDType.AnimationClip, Source = "demo.blk", Container = "Assets/Characters/Hero/Animation/Walk.fbx", PathID = 3 });
+            builder.Add(new CatalogAsset { Name = "Diffuse", Type = ClassIDType.Texture2D, Source = "demo.blk", Container = "Assets/Characters/Hero/Textures/Diffuse.png", PathID = 4 });
+            builder.Add(new CatalogAsset { Name = "Info", Type = ClassIDType.TextAsset, Source = "demo.blk", Container = "Assets/Characters/Hero/info.json", PathID = 5 });
             var catalog = builder.Build(GameType.ZZZ, "fixture");
             using var form = new DirectoryExportForm(catalog, new PreviewBridge(), new(GameType.ZZZ, [], "", ""), "Assets/Characters/Hero", output)
                 { Opacity = 0, ShowInTaskbar = false };
             form.Show();
-            var button = form.Controls.OfType<System.Windows.Forms.FlowLayoutPanel>().SelectMany(p => p.Controls.OfType<System.Windows.Forms.Button>()).Single(b => b.Text == "收集目录");
+            var button = (System.Windows.Forms.Button)form.Controls.Find("collectDirectory", true).Single();
             button.PerformClick();
             var timer = Stopwatch.StartNew();
             while (!button.Enabled && timer.ElapsedMilliseconds < 5000) { System.Windows.Forms.Application.DoEvents(); Thread.Sleep(5); }
-            Check(form.Controls.OfType<System.Windows.Forms.ListView>().Single().VirtualListSize == 3, "directory dialog collects and previews primary resources");
+            Check(((System.Windows.Forms.ListView)form.Controls.Find("resourcePreview", true).Single()).VirtualListSize == 5, "directory dialog collects and previews primary resources");
+            var tree = (System.Windows.Forms.TreeView)form.Controls.Find("directoryTree", true).Single();
+            var typeList = (System.Windows.Forms.CheckedListBox)form.Controls.Find("fileTypes", true).Single();
+            var preview = (System.Windows.Forms.ListView)form.Controls.Find("resourcePreview", true).Single();
+            tree.Nodes[0].Nodes.Cast<System.Windows.Forms.TreeNode>().Single(n => n.Text == "Model").Checked = false;
+            Check(preview.VirtualListSize == 4, "unchecking one directory preserves other selections");
+            for (int i = 0; i < typeList.Items.Count; i++) typeList.SetItemChecked(i, typeList.Items[i].ToString().StartsWith(".fbx"));
+            System.Windows.Forms.Application.DoEvents();
+            Check(preview.VirtualListSize == 2, "directory and file-type multiselect intersect");
             form.PerformLayout();
             using var bitmap = new System.Drawing.Bitmap(form.Width, form.Height);
             form.DrawToBitmap(bitmap, new System.Drawing.Rectangle(0, 0, form.Width, form.Height));
@@ -430,6 +440,13 @@ using (var cancelParallel = new CancellationTokenSource())
     Check(cancelled.Cancelled && cancelled.Pending == 8 && cancelled.Succeeded == 0 && running == 2,
         "cancellation stops all active exports and does not start queued items");
 }
+var selectionPlan = new DirectoryExportPlan("Assets/Hero", true, [
+    new("Assets/Hero/Info.json", []), new("Assets/Hero/Ani/Idle.fbx", directoryPlan.Groups[0].Members),
+    new("Assets/Hero/Ani/Combat/Attack.fbx", []), new("Assets/Hero/Textures/Body.png", [])], 4, 0);
+var selectedPlan = selectionPlan.Select(["Assets/Hero", "assets/hero/ani", "Assets/Hero/Textures"], [".FBX", ".png"]);
+Check(selectedPlan.Groups.Select(g => g.ResourcePath).SequenceEqual(new[] { "Assets/Hero/Ani/Idle.fbx", "Assets/Hero/Textures/Body.png" }), "directory and extension multiselect excludes unchecked descendants");
+Check(selectedPlan.Groups[0].Members.Length == 3, "file filtering retains every subasset of a selected FBX");
+Check(selectionPlan.Select([], [".fbx"]).Groups.Length == 0 && selectionPlan.Select(["Assets/Hero"], []).Groups.Length == 0, "empty selection never means export all");
 Check(ResourcePaths.OutputPath(output, "Assets/Hero", "Assets/Hero/Ani/Idle.fbx") == Path.Combine(output, "Ani", "Idle.fbx"), "source directory layout has no batch or per-file wrapper");
 var longName = new string('a', 160) + ".fbx";
 Check(ResourcePaths.OutputSegment(longName) == longName, "valid long source names are preserved");

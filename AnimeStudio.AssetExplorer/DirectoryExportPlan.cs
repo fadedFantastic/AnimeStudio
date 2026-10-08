@@ -6,9 +6,20 @@ namespace AnimeStudio.AssetExplorer;
 public sealed record PrimaryAssetGroup(string ResourcePath, CatalogAsset[] Members)
 {
     public bool IsFbx => ResourcePath.EndsWith(".fbx", StringComparison.OrdinalIgnoreCase);
+    public string Extension => Path.GetExtension(ResourcePath).ToLowerInvariant();
 }
 
-public sealed record DirectoryExportPlan(string Directory, bool Recursive, PrimaryAssetGroup[] Groups, int MatchedRows, int DuplicateRows);
+public sealed record DirectoryExportPlan(string Directory, bool Recursive, PrimaryAssetGroup[] Groups, int MatchedRows, int DuplicateRows)
+{
+    // Exact directories: an unchecked descendant stays excluded even if its parent is checked.
+    public DirectoryExportPlan Select(IEnumerable<string> directories, IEnumerable<string> extensions)
+    {
+        var selectedDirectories = directories.Select(ResourcePaths.Normalize).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var selectedTypes = extensions.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var selected = Groups.Where(g => selectedDirectories.Contains(ResourcePaths.Parent(g.ResourcePath)) && selectedTypes.Contains(g.Extension)).ToArray();
+        return this with { Groups = selected, MatchedRows = selected.Sum(g => g.Members.Length), DuplicateRows = 0 };
+    }
+}
 
 public static class ResourcePaths
 {
