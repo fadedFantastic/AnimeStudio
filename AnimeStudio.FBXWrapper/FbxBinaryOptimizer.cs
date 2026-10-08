@@ -8,13 +8,15 @@ using System.Text;
 
 namespace AnimeStudio;
 
-/// <summary>Lossless compaction of binary FBX produced by our native exporter.</summary>
-public static class FbxBinaryOptimizer
+/// <summary>Animation metadata and lossless compaction for binary FBX from our native exporter.</summary>
+public static partial class FbxBinaryOptimizer
 {
     public sealed record Result(long OriginalBytes, long OptimizedBytes, int ConstantCurves, long RemovedKeys,
-        int UnusedEmptyCurves, int CompressedArrays);
+        int UnusedEmptyCurves, int CompressedArrays, int UpdatedTimeRanges = 0);
 
-    public static Result Optimize(string path)
+    public static Result Optimize(string path) => CompleteExport(path, null, true);
+
+    internal static Result CompleteExport(string path, IReadOnlyList<ImportedKeyframedAnimation> animations, bool optimize)
     {
         var bytes = File.ReadAllBytes(path);
         var unchanged = new Result(bytes.LongLength, bytes.LongLength, 0, 0, 0, 0);
@@ -25,27 +27,29 @@ public static class FbxBinaryOptimizer
         document.Read();
         if (!document.HasStandardFooter) return unchanged;
         var objects = document.Nodes.FirstOrDefault(n => n.Name == "Objects");
-        if (objects == null || !objects.Children.Any(n => n.Name == "AnimationCurve")) return unchanged;
+        if (objects == null) return unchanged;
+        if (animations == null && !objects.Children.Any(n => n.Name == "AnimationCurve")) return unchanged;
+        var ranges = animations == null ? 0 : WriteAnimationTimeSpans(document, objects, animations);
         var reduced = 0; long removedKeys = 0;
-        foreach (var curve in objects.Children.Where(n => n.Name == "AnimationCurve"))
+        foreach (var curve in objects.Children.Where(n => optimize && n.Name == "AnimationCurve"))
         {
             var removed = ReduceConstantCurve(curve);
             if (removed > 0) { reduced++; removedKeys += removed; }
         }
-        var empty = RemoveUnreferencedEmptyCurves(document, objects);
+        var empty = optimize ? RemoveUnreferencedEmptyCurves(document, objects) : 0;
         var compressed = 0;
         foreach (var node in document.AllNodes())
             foreach (var property in node.Properties)
-                if (property.CompressArray()) compressed++;
-        if (reduced == 0 && empty == 0 && compressed == 0) return unchanged;
+                if (optimize && property.CompressArray()) compressed++;
+        if (reduced == 0 && empty == 0 && compressed == 0 && ranges == 0) return unchanged;
         var temporary = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path)), ".fbx-" + Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
             using (var writer = new BinaryWriter(File.Create(temporary))) document.Write(writer);
             var length = new FileInfo(temporary).Length;
-            if (length >= bytes.LongLength) return unchanged;
+            if (length >= bytes.LongLength && ranges == 0) return unchanged;
             File.Move(temporary, path, true);
-            return new(bytes.LongLength, length, reduced, removedKeys, empty, compressed);
+            return new(bytes.LongLength, length, reduced, removedKeys, empty, compressed, ranges);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }

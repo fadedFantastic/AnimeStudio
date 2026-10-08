@@ -230,6 +230,8 @@ namespace AnimeStudio
     {
         public string Name { get; set; }
         public float SampleRate { get; set; }
+        public double? StartTime { get; set; }
+        public double? StopTime { get; set; }
         public List<ImportedAnimationKeyframedTrack> TrackList { get; set; }
 
         public ImportedAnimationKeyframedTrack FindTrack(string path, string attribute = null)

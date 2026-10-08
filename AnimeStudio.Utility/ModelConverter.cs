@@ -806,6 +806,11 @@ namespace AnimeStudio
                 }
                 iAnim.Name = name;
                 iAnim.SampleRate = animationClip.m_SampleRate;
+                if (!animationClip.m_Legacy && animationClip.m_MuscleClip != null)
+                {
+                    iAnim.StartTime = animationClip.m_MuscleClip.m_StartTime;
+                    iAnim.StopTime = animationClip.m_MuscleClip.m_StopTime;
+                }
                 iAnim.TrackList = new List<ImportedAnimationKeyframedTrack>();
                 AnimationList.Add(iAnim);
                 if (animationClip.m_Legacy)

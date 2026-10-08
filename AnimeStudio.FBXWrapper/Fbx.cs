@@ -50,8 +50,8 @@ namespace AnimeStudio
                 }
 
                 Directory.SetCurrentDirectory(currentDir);
-                if (exportOptions.optimizeAnimationSize && imported.AnimationList?.Count > 0)
-                    FbxBinaryOptimizer.Optimize(file.FullName);
+                if (imported.AnimationList?.Count > 0)
+                    FbxBinaryOptimizer.CompleteExport(file.FullName, imported.AnimationList, exportOptions.optimizeAnimationSize);
             }
         }
 

@@ -15,6 +15,7 @@ public static class FbxPlaybackValidation
     {
         public string name;
         public float seconds;
+        public float firstFrame, lastFrame, frameRate;
         public int paths, matchedPaths, movedTransforms;
     }
     [Serializable] public sealed class Report
@@ -56,6 +57,7 @@ public static class FbxPlaybackValidation
             animationImporter.preserveHierarchy = false;
             animationImporter.importAnimation = true;
             animationImporter.SaveAndReimport();
+            var takeRanges = animationImporter.defaultClipAnimations.ToDictionary(c => c.name);
             var model = AssetDatabase.LoadAssetAtPath<GameObject>(modelPath);
             report.renderers = model.GetComponentsInChildren<Renderer>(true).Length;
             var scene = EditorSceneManager.NewPreviewScene();
@@ -64,7 +66,9 @@ public static class FbxPlaybackValidation
                 foreach (var clip in AssetDatabase.LoadAllAssetsAtPath(animationPath).OfType<AnimationClip>().Where(c => !c.name.StartsWith("__preview__")))
                 {
                     var paths = AnimationUtility.GetCurveBindings(clip).Select(b => b.path).Distinct().ToArray();
-                    var row = new ClipResult { name = clip.name, seconds = clip.length, paths = paths.Length,
+                    var range = takeRanges[clip.name];
+                    var row = new ClipResult { name = clip.name, seconds = clip.length, frameRate = clip.frameRate,
+                        firstFrame = range.firstFrame, lastFrame = range.lastFrame, paths = paths.Length,
                         matchedPaths = paths.Count(p => p.Length == 0 || model.transform.Find(p) != null) };
                     report.clips.Add(row);
                     var instance = (GameObject)PrefabUtility.InstantiatePrefab(model, scene);
@@ -86,7 +90,8 @@ public static class FbxPlaybackValidation
             }
             finally { EditorSceneManager.ClosePreviewScene(scene); }
             report.success = report.avatarValid && report.renderers > 0 && report.clips.Count > 0 &&
-                report.clips.All(c => c.seconds > 0 && c.paths > 0 && c.paths == c.matchedPaths) && report.clips.Any(c => c.movedTransforms > 10);
+                report.clips.All(c => c.seconds > 0 && c.paths > 0 && c.paths == c.matchedPaths &&
+                    Math.Abs(c.lastFrame - c.firstFrame - c.seconds * c.frameRate) < 0.001f) && report.clips.Any(c => c.movedTransforms > 10);
             if (!report.success) throw new InvalidDataException("FBX animation cannot fully bind to and animate the model; inspect the report.");
         }
         catch (Exception ex) { report.error = ex.ToString(); report.success = false; }

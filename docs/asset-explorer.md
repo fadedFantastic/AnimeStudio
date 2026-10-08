@@ -48,6 +48,8 @@ ZZZ 的部分原始模型（例如 `Avatar_Female_Size02_Remielle_Origin_Model.f
 本次通过可选的 `preserveRootNodeAsNull` 修复 Asset Explorer 的导出；上游普通导出的默认行为不变，无需修改原生 FBX DLL。
 旧动画文件需要重新导出。动画文件本身没有网格时，Unity 预览需要指定对应的模型。
 
+二进制 FBX 还会为每个 AnimationStack / Take 单独写入 Local 和 Reference 起止时间。源 AnimationClip 的时间区间会与该 Clip 实际写入的关键帧边界共同校验，确保末尾采样不会被裁掉；旧格式缺少区间时使用其自身曲线范围。这样不会让所有 Clip 都继承整个 FBX 中最长动画的结束帧。以 Remielle Origin Attack Normal 01 为例：主动作和对应 Default 的 End 为 161；两个 `_End` 版本保持 187。只修正区间元数据，不截断、补帧或拉伸动画曲线。
+
 回归检查覆盖真实二进制 FBX 根节点及动画、目录/扩展名多选、相对目录布局、并发共享贴图、文件冲突、已有文件跳过、取消和失败清理。
 `tests/UnityFbxValidation/Editor/FbxPlaybackValidation.cs` 可放入临时 Unity 工程验证实际导入：使用 Generic 和 Copy From Other Avatar，检查所有动画路径匹配模型，并采样动作确认骨骼运动。命令参数见该脚本注释。
 

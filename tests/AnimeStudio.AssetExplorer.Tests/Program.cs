@@ -374,6 +374,7 @@ foreach (var preserve in new[] { false, true })
 }
 var sourceRoot = Path.Combine(output, "relocated"); Directory.CreateDirectory(sourceRoot);
 FbxOptimizationTests.Run(output, Check);
+FbxTimeSpanTests.Run(output, Check);
 var directoryBuilder = new AssetIndexStore.Builder();
 foreach (var asset in new[]
 {

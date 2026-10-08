@@ -9,6 +9,8 @@ internal sealed class FbxInspection
     public List<string> Animations { get; } = [];
     public int CurveCount { get; private set; }
     public List<long> CurveIds { get; } = [];
+    public Dictionary<string, (long Start, long Stop)> TakeTimes { get; } = [];
+    public Dictionary<string, Dictionary<string, long>> StackTimes { get; } = [];
     public List<(long Child, long Parent)> Connections { get; } = [];
     public Node[] Roots => Models.Where(m => Connections.Any(c => c.Child == m.Id && c.Parent == 0)).ToArray();
 
@@ -19,7 +21,7 @@ internal sealed class FbxInspection
         var wide = reader.ReadInt32() >= 7500;
         var headerSize = wide ? 25 : 13;
         var result = new FbxInspection();
-        bool ReadNode()
+        bool ReadNode(string take = null, string stack = null)
         {
             var end = wide ? reader.ReadInt64() : reader.ReadUInt32();
             var count = wide ? reader.ReadInt64() : reader.ReadUInt32();
@@ -29,7 +31,7 @@ internal sealed class FbxInspection
             var name = Encoding.UTF8.GetString(reader.ReadBytes(nameLength));
             var dataEnd = reader.BaseStream.Position + length;
             var properties = new List<object>();
-            if (name is "Model" or "AnimationStack" or "AnimationCurve" or "C")
+            if (name is "Model" or "AnimationStack" or "AnimationCurve" or "C" or "Take" or "LocalTime" or "ReferenceTime" || name == "P" && stack != null)
                 for (var i = 0; i < count; i++)
                 {
                     var type = reader.ReadChar();
@@ -43,10 +45,18 @@ internal sealed class FbxInspection
                 }
             reader.BaseStream.Position = dataEnd;
             if (name == "Model") result.Models.Add(new((long)properties[0], ((string)properties[1]).Split('\0')[0], (string)properties[2]));
-            if (name == "AnimationStack") result.Animations.Add(((string)properties[1]).Split('\0')[0]);
+            if (name == "AnimationStack")
+            {
+                stack = ((string)properties[1]).Split('\0')[0]; result.Animations.Add(stack);
+                result.StackTimes[stack] = [];
+            }
+            if (name == "Take") take = (string)properties[0];
+            if (name == "LocalTime" && take != null) result.TakeTimes[take] = ((long)properties[0], (long)properties[1]);
+            if (name == "P" && stack != null && properties.Count == 5 && properties[4] is long value)
+                result.StackTimes[stack][(string)properties[0]] = value;
             if (name == "AnimationCurve") { result.CurveCount++; result.CurveIds.Add((long)properties[0]); }
             if (name == "C" && (string)properties[0] == "OO") result.Connections.Add(((long)properties[1], (long)properties[2]));
-            while (reader.BaseStream.Position < end - headerSize) if (!ReadNode()) break;
+            while (reader.BaseStream.Position < end - headerSize) if (!ReadNode(take, stack)) break;
             reader.BaseStream.Position = end;
             return true;
         }
