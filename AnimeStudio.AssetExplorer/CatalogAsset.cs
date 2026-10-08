@@ -19,6 +19,7 @@ public interface IMeshCatalog
 
 public sealed record CatalogRequest(GameType Game, CatalogAsset[] Assets, string CabMap, string SourceRoot)
 {
+    public string ExportLogDirectory { get; init; }
     public int ExportWorkers { get; init; } = 2;
     [Newtonsoft.Json.JsonIgnore]
     public IMeshCatalog MeshCatalog { get; init; }

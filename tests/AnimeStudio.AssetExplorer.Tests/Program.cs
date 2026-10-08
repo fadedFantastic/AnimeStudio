@@ -123,11 +123,18 @@ if (args.FirstOrDefault() == "--worker-crash")
     return;
 }
 
-if (args.FirstOrDefault() is "--directory" or "--directory-origin")
+if (args.FirstOrDefault() is "--directory" or "--directory-origin" or "--directory-attack")
 {
     var store = AssetIndexStore.Load(args[2], output, Console.WriteLine, default);
+    if (args.Length > 4)
+        foreach (var dictionary in new[] { "Z3-AssetIndex-Eleiyas.json", "Z3-AssetIndex-Recovered.json" })
+        {
+            var dictionaryPath = Path.Combine(Path.GetDirectoryName(args[4]), dictionary);
+            if (File.Exists(dictionaryPath)) store.ApplyPathDict(JsonConvert.DeserializeObject<Dictionary<ulong, string>>(File.ReadAllText(dictionaryPath)));
+        }
     var plan = store.CollectDirectory(args[3], true, default);
     if (args[0] == "--directory-origin") plan = plan with { Groups = plan.Groups.Where(g => g.ResourcePath.EndsWith("Remielle_Origin_Model.fbx")).ToArray() };
+    if (args[0] == "--directory-attack") plan = plan with { Groups = plan.Groups.Where(g => g.ResourcePath.EndsWith("/Avatar_Female_Size02_Remielle_Origin_Ani_Attack_Normal_01.fbx")).ToArray() };
     Console.WriteLine($"DIRECTORY {plan.Groups.Length} primary files, {plan.MatchedRows} rows, {plan.DuplicateRows} duplicate rows");
     File.WriteAllText(Path.Combine(output, "collection.json"), JsonConvert.SerializeObject(plan, Formatting.Indented));
     if (args.Length > 4)
@@ -138,11 +145,11 @@ if (args.FirstOrDefault() is "--directory" or "--directory-origin")
         var bridge = (IStudioBridge)Activator.CreateInstance(bridgeType,
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance,
             null, new object[] { null }, null);
-        var context = new CatalogRequest(store.Game, [], args[4], "") { MeshCatalog = store, ExportWorkers = args.Length > 6 ? int.Parse(args[6]) : 2 };
+        var context = new CatalogRequest(store.Game, [], args[4], "") { MeshCatalog = store, ExportLogDirectory = Path.Combine(output, "logs"), ExportWorkers = args.Length > 6 ? int.Parse(args[6]) : 2 };
         var exportTimer = Stopwatch.StartNew();
         using var exportCancellation = new CancellationTokenSource();
         if (args.Length > 7) exportCancellation.CancelAfter(int.Parse(args[7]));
-        var result = await bridge.ExportDirectoryAsync(plan, context, output, Console.WriteLine, exportCancellation.Token);
+        var result = await bridge.ExportDirectoryAsync(plan, context, Path.Combine(output, "files"), Console.WriteLine, exportCancellation.Token);
         Console.WriteLine($"EXPORT BENCH workers={context.ExportWorkers} seconds={exportTimer.Elapsed.TotalSeconds:F2}");
         File.WriteAllText(Path.Combine(output, "directory-result.json"), JsonConvert.SerializeObject(result, Formatting.Indented));
         if (args.Length > 7)
@@ -150,17 +157,21 @@ if (args.FirstOrDefault() is "--directory" or "--directory-origin")
             Check(result.Cancelled && result.Pending > 0 && result.Failed == 0, "real worker cancellation returns unfinished resources without reporting failures");
             return;
         }
-        Check(result.Succeeded == plan.Groups.Length && result.Failed == 0, "every primary resource in the real directory exported");
-        var manifest = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(Path.Combine(result.OutputDirectory, "export-manifest.json")));
+        Check(result.Succeeded + result.Skipped == plan.Groups.Length && result.Failed == 0 && result.Pending == 0, "every primary resource exported or explicitly skipped");
+        if (plan.Groups.All(g => g.IsFbx)) Check(result.Succeeded == plan.Groups.Length, "all FBXs exported without skipping");
+        var manifest = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(result.ReportPath));
+        Check(!Directory.Exists(result.OutputDirectory) || !Directory.GetFiles(result.OutputDirectory, "primary-resource.json", SearchOption.AllDirectories).Any(), "output has no per-resource metadata files");
+        if (plan.Groups.All(g => g.IsFbx)) Check(!Directory.GetFiles(result.OutputDirectory, "*.json", SearchOption.AllDirectories).Any(), "FBX output has no JSON sidecars or reports");
         foreach (var item in manifest["Items"])
         {
             var path = (string)item["ResourcePath"];
-            if (!path.EndsWith(".fbx", StringComparison.OrdinalIgnoreCase)) continue;
+            if ((string)item["Status"] != "success" || !path.EndsWith(".fbx", StringComparison.OrdinalIgnoreCase)) continue;
             Check(item["MainFiles"].Count() == 1, "one main FBX per resource path: " + path);
             var file = Path.Combine(result.OutputDirectory, (string)item["MainFiles"][0]);
-            var details = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(Path.Combine(Path.GetDirectoryName(file), "primary-resource.json")));
+            var details = FbxInspection.Read(file);
+            Check(details.Roots.Single().Type == "Null", "scene container is not exported as an extra skeleton root");
             var expected = plan.Groups.Single(g => g.ResourcePath == path).Members.Where(a => a.Type == ClassIDType.AnimationClip).Select(a => a.Name).ToArray();
-            Check(expected.All(name => details["Animations"].Values<string>().Contains(name)), "subanimations embedded in their own FBX");
+            Check(expected.All(name => details.Animations.Contains(name)), "subanimations embedded in their own FBX");
             Check(!Directory.EnumerateFiles(Path.GetDirectoryName(file), "*.anim", SearchOption.AllDirectories).Any(), "no loose subasset animations");
             if (expected.Length > 0) Check(Encoding.ASCII.GetString(File.ReadAllBytes(file)).Contains("AnimationStack"), "FBX contains actual animation stacks");
         }
@@ -321,6 +332,11 @@ foreach (var formatting in new[] { Formatting.None, Formatting.Indented })
     try { store.Search(new("m", "", "", false), cts.Token); throw new Exception("cancel ignored"); }
     catch (OperationCanceledException) { Check(true, "search cancellation"); }
 }
+Task<DirectoryExportResult> RunDirectory(DirectoryExportPlan plan, string folder,
+    Func<PrimaryAssetGroup, string, CancellationToken, Task<PrimaryExportResult>> export,
+    Action<string> progress, CancellationToken token, int concurrency = 1)
+    => DirectoryExportService.RunAsync(plan, folder, export, progress, token, concurrency, Path.Combine(output, "logs"));
+
 var fixture = new AnimationFbxFixture();
 foreach (var preserve in new[] { false, true })
 {
@@ -351,9 +367,9 @@ Check(directoryPlan.Groups[0].Members.Length == 3 && directoryPlan.Groups[1].Mem
 Check(directoryStore.CollectDirectory("Assets/Hero", false, default).Groups.Length == 1, "nonrecursive directory collection");
 Check(directoryPlan.MatchedRows == 5, "guessed paths do not determine directory membership");
 try { ResourcePaths.Normalize("Assets/Hero/../other"); throw new Exception("Traversal accepted"); } catch (ArgumentException) { Check(true, "resource traversal rejected"); }
-Check(ResourcePaths.OutputDirectory(output, "Assets/Hero", "Assets/Hero/A:B.fbx") != ResourcePaths.OutputDirectory(output, "Assets/Hero", "Assets/Hero/A?B.fbx"), "sanitized filenames cannot collide");
+Check(ResourcePaths.OutputPath(output, "Assets/Hero", "Assets/Hero/A:B.fbx") != ResourcePaths.OutputPath(output, "Assets/Hero", "Assets/Hero/A?B.fbx"), "sanitized filenames cannot collide");
 var visits = 0;
-var batch = await DirectoryExportService.RunAsync(directoryPlan, output, (group, folder, token) =>
+var batch = await RunDirectory(directoryPlan, Path.Combine(output, "batch"), (group, folder, token) =>
 {
     visits++;
     if (visits == 1) throw new InvalidDataException("fixture failure");
@@ -361,12 +377,12 @@ var batch = await DirectoryExportService.RunAsync(directoryPlan, output, (group,
     return Task.FromResult(new PrimaryExportResult([file], 1));
 }, null, default);
 Check(visits == 2 && batch.Failed == 1 && batch.Succeeded == 1 && batch.Pending == 0, "batch continues after one failed primary resource");
-var batchManifest = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(Path.Combine(batch.OutputDirectory, "export-manifest.json")));
+var batchManifest = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(batch.ReportPath));
 Check((string)batchManifest["State"] == "partial", "batch manifest never reports partial export as complete");
 using (var cancelBatch = new CancellationTokenSource())
 {
     var progressCount = 0;
-    var cancelled = await DirectoryExportService.RunAsync(directoryPlan, output, (group, folder, token) =>
+    var cancelled = await RunDirectory(directoryPlan, Path.Combine(output, "cancel-batch"), (group, folder, token) =>
     {
         token.ThrowIfCancellationRequested();
         var file = Path.Combine(folder, "main.fbx"); File.WriteAllText(file, "fixture");
@@ -379,7 +395,7 @@ var parallelPlan = new DirectoryExportPlan("Assets/Test", true,
     Enumerable.Range(0, 8).Select(i => new PrimaryAssetGroup($"Assets/Test/{i}.asset", [])).ToArray(), 8, 0);
 var bothStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 int activeExports = 0, peakExports = 0, startedExports = 0;
-var parallelBatch = await DirectoryExportService.RunAsync(parallelPlan, output, async (group, folder, token) =>
+var parallelBatch = await RunDirectory(parallelPlan, Path.Combine(output, "parallel"), async (group, folder, token) =>
 {
     var active = Interlocked.Increment(ref activeExports);
     InterlockedExtensionsMax(active);
@@ -389,7 +405,7 @@ var parallelBatch = await DirectoryExportService.RunAsync(parallelPlan, output, 
         await bothStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
         await Task.Delay(15, token);
         if (group.ResourcePath.EndsWith("3.asset")) throw new IOException("fixture failure");
-        var file = Path.Combine(folder, "main.bin"); await File.WriteAllTextAsync(file, "fixture", token);
+        var file = Path.Combine(folder, Path.GetFileName(group.ResourcePath) + ".bin"); await File.WriteAllTextAsync(file, "fixture", token);
         return new PrimaryExportResult([file]);
     }
     finally { Interlocked.Decrement(ref activeExports); }
@@ -401,11 +417,11 @@ void InterlockedExtensionsMax(int value)
     while (Interlocked.CompareExchange(ref peakExports, value, before) != before);
 }
 Check(peakExports == 2 && parallelBatch.Succeeded == 7 && parallelBatch.Failed == 1, "bounded parallel exports overlap and continue after failures");
-Check(File.ReadAllLines(Path.Combine(parallelBatch.OutputDirectory, "results.jsonl")).Length == 8, "parallel journal has exactly one result per primary resource");
+Check(File.ReadAllLines(Path.ChangeExtension(parallelBatch.ReportPath, ".jsonl")).Length == 8, "parallel journal has exactly one result per primary resource");
 using (var cancelParallel = new CancellationTokenSource())
 {
     int running = 0;
-    var cancelled = await DirectoryExportService.RunAsync(parallelPlan, output, async (group, folder, token) =>
+    var cancelled = await RunDirectory(parallelPlan, Path.Combine(output, "cancel-parallel"), async (group, folder, token) =>
     {
         if (Interlocked.Increment(ref running) == 2) cancelParallel.Cancel();
         await Task.Delay(Timeout.Infinite, token);
@@ -414,6 +430,39 @@ using (var cancelParallel = new CancellationTokenSource())
     Check(cancelled.Cancelled && cancelled.Pending == 8 && cancelled.Succeeded == 0 && running == 2,
         "cancellation stops all active exports and does not start queued items");
 }
+Check(ResourcePaths.OutputPath(output, "Assets/Hero", "Assets/Hero/Ani/Idle.fbx") == Path.Combine(output, "Ani", "Idle.fbx"), "source directory layout has no batch or per-file wrapper");
+var longName = new string('a', 160) + ".fbx";
+Check(ResourcePaths.OutputSegment(longName) == longName, "valid long source names are preserved");
+
+var sharedPlan = new DirectoryExportPlan("Assets/Hero", true,
+    [new("Assets/Hero/Ani/Idle.fbx", []), new("Assets/Hero/Ani/Walk.fbx", [])], 2, 0);
+Task<PrimaryExportResult> ExportShared(PrimaryAssetGroup group, string folder, CancellationToken token)
+{
+    var file = Path.Combine(folder, Path.GetFileName(group.ResourcePath)); File.WriteAllText(file, group.ResourcePath);
+    File.WriteAllText(Path.Combine(folder, "shared.png"), "texture");
+    return Task.FromResult(new PrimaryExportResult([file]));
+}
+var shared = await RunDirectory(sharedPlan, Path.Combine(output, "shared"), ExportShared, null, default, 2);
+Check(shared.Succeeded == 2 && File.Exists(Path.Combine(shared.OutputDirectory, "Ani", "Idle.fbx")) &&
+    Directory.GetFiles(shared.OutputDirectory, "*", SearchOption.AllDirectories).Length == 3, "parallel resources share identical dependencies without adding directories or metadata");
+Check(!shared.ReportPath.StartsWith(shared.OutputDirectory + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase), "export journal stays outside output assets");
+var existing = await RunDirectory(sharedPlan, shared.OutputDirectory, ExportShared, null, default, 2);
+Check(existing.Skipped == 2 && existing.Failed == 0 && existing.Pending == 0 && File.ReadAllText(Path.Combine(shared.OutputDirectory, "Ani", "Idle.fbx")) == sharedPlan.Groups[0].ResourcePath, "existing files are skipped without overwrite or duplicate suffixes");
+var conflict = await RunDirectory(sharedPlan, Path.Combine(output, "conflict"), (group, folder, token) =>
+{
+    var result = ExportShared(group, folder, token);
+    File.WriteAllText(Path.Combine(folder, "shared.png"), group.ResourcePath);
+    return result;
+}, null, default, 2);
+Check(conflict.Succeeded == 1 && conflict.Failed == 1 && Directory.GetFiles(conflict.OutputDirectory, "*.fbx", SearchOption.AllDirectories).Length == 1,
+    "conflicting dependencies cannot overwrite another resource or publish a partial model");
+var skipped = await RunDirectory(sharedPlan, Path.Combine(output, "skipped"), (_, _, _) => Task.FromResult(PrimaryExportResult.Skip("unsupported fixture")), null, default, 2);
+Check(skipped.Skipped == 2 && skipped.Failed == 0 && skipped.Pending == 0 && !Directory.Exists(skipped.OutputDirectory), "unsupported resources only produce a log, no substitute JSON or empty output tree");
+var broken = await RunDirectory(sharedPlan, Path.Combine(output, "broken"), (group, folder, token) =>
+{
+    File.WriteAllText(Path.Combine(folder, "partial.fbx"), "partial"); throw new IOException("fixture export failure");
+}, null, default, 2);
+Check(broken.Failed == 2 && !Directory.Exists(broken.OutputDirectory), "failed exports leave no incomplete output files");
 var meshPath = "Assets/OriginalResRepos/ART/DiscreteMeshAssets/Hero_Origin_Model/Body.mesh";
 var otherMeshPath = "Assets/OriginalResRepos/ART/DiscreteMeshAssets/Hero_Other_Model/Body.mesh";
 var meshBuilder = new AssetIndexStore.Builder();

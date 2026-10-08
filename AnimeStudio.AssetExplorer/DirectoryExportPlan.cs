@@ -46,15 +46,34 @@ public static class ResourcePaths
         return name[..Math.Min(name.Length, 100)];
     }
 
-    public static string OutputDirectory(string outputRoot, string sourceDirectory, string resourcePath)
+    public static string OutputPath(string outputRoot, string sourceDirectory, string resourcePath)
     {
         var resource = Normalize(resourcePath); var directory = Normalize(sourceDirectory);
         if (!IsWithin(resource, directory, true)) throw new ArgumentException("资源不属于所选目录。");
-        var relative = resource[(directory.Length + 1)..].Split('/').Select(SafeSegment).ToArray();
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(resource.ToLowerInvariant())))[..10];
-        relative[^1] += ".export-" + hash;
-        var root = Path.GetFullPath(outputRoot);
-        var destination = Path.GetFullPath(Path.Combine(new[] { root }.Concat(relative).ToArray()));
+        var relative = resource[(directory.Length + 1)..].Split('/').Select(OutputSegment).ToArray();
+        return ContainedPath(outputRoot, Path.Combine(relative));
+    }
+
+    public static string OutputDirectory(string outputRoot, string sourceDirectory, string resourcePath)
+        => Path.GetDirectoryName(OutputPath(outputRoot, sourceDirectory, resourcePath));
+
+    public static string OutputSegment(string value)
+    {
+        var stem = value.Split('.')[0].ToUpperInvariant();
+        var reserved = new[] { "CON", "PRN", "AUX", "NUL" }.Contains(stem) ||
+            stem.Length == 4 && (stem.StartsWith("COM") || stem.StartsWith("LPT")) && char.IsDigit(stem[3]);
+        if (value.Length is > 0 and <= 255 && !reserved && value.IndexOfAny(Path.GetInvalidFileNameChars()) < 0 && value.TrimEnd(' ', '.') == value)
+            return value;
+        var safe = SafeSegment(value);
+        if (safe == value) return value;
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)))[..8];
+        return Path.GetFileNameWithoutExtension(safe) + "-" + hash + Path.GetExtension(safe);
+    }
+
+    public static string ContainedPath(string root, string relative)
+    {
+        root = Path.GetFullPath(root);
+        var destination = Path.GetFullPath(Path.Combine(root, relative));
         if (!destination.StartsWith(root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("输出路径越界。");
         return destination;

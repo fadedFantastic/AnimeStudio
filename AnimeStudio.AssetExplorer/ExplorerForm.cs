@@ -256,7 +256,7 @@ public sealed class ExplorerForm : Form
         if (busy) return;
         if (store == null) { Status("请先打开资源清单。"); return; }
         var selectedDirectory = ResourcePaths.Parent(Selected().FirstOrDefault()?.Container);
-        var context = new CatalogRequest(Enum.Parse<GameType>(game.Text), [], cab.Text, root.Text) { MeshCatalog = store, ExportWorkers = settings.ExportWorkers };
+        var context = new CatalogRequest(Enum.Parse<GameType>(game.Text), [], cab.Text, root.Text) { MeshCatalog = store, ExportWorkers = settings.ExportWorkers, ExportLogDirectory = Path.Combine(settings.WorkDirectory, "ExportLogs") };
         using var dialog = new DirectoryExportForm(store, bridge, context,
             string.IsNullOrEmpty(selectedDirectory) ? settings.ResourceDirectory : selectedDirectory, settings.ExportDirectory);
         dialog.ShowDialog(this);

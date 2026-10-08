@@ -1,5 +1,3 @@
-using Newtonsoft.Json;
-
 namespace AnimeStudio.AssetExplorer;
 
 public static class PrimaryFbxExporter
@@ -28,37 +26,13 @@ public static class PrimaryFbxExporter
         if (model.MeshList.Count == 0 && clips.Length == 0) throw new InvalidDataException("该 FBX 没有网格或动画。");
         token.ThrowIfCancellationRequested();
         Directory.CreateDirectory(folder);
-        var file = Path.Combine(folder, ResourcePaths.SafeSegment(name) + ".fbx");
+        var file = Path.Combine(folder, Path.ChangeExtension(ResourcePaths.OutputSegment(Path.GetFileName(group.ResourcePath)), ".fbx"));
         ExportNative(file, model, options.Fbx with { exportAllNodes = true, exportAnimations = true,
-            exportSkins = true, preserveRootNodeAsNull = true, castToBone = model.MeshList.Count == 0 || options.Fbx.castToBone }, token);
+            exportSkins = true, preserveRootNodeAsNull = true,
+            castToBone = model.MeshList.Count == 0 || options.Fbx.castToBone }, token);
 
-        // Keep dynamic material dependencies alongside the main file; subanimations stay inside the FBX.
-        var materials = manager.assetsFileList.SelectMany(f => f.Objects.OfType<Material>()).ToArray();
-        if (materials.Length > 0)
-        {
-            var dir = Path.Combine(folder, "Materials"); Directory.CreateDirectory(dir);
-            foreach (var material in materials)
-            {
-                token.ThrowIfCancellationRequested();
-                File.WriteAllText(Path.Combine(dir, ResourcePaths.SafeSegment(material.Name) + "-" + material.m_PathID + ".json"),
-                    JsonConvert.SerializeObject((object)material.ToType() ?? material, Formatting.Indented));
-            }
-        }
-        foreach (var texture in manager.assetsFileList.SelectMany(f => f.Objects.OfType<Texture2D>()))
-        {
-            token.ThrowIfCancellationRequested();
-            var dir = Path.Combine(folder, "Textures"); Directory.CreateDirectory(dir);
-            using var image = texture.ConvertToStream(ImageFormat.Png, true);
-            if (image == null) throw new InvalidDataException("贴图转换失败：" + texture.Name);
-            var identity = texture.assetsFile.fileName + "-" + texture.m_PathID;
-            var path = Path.Combine(dir, ResourcePaths.SafeSegment(texture.Name) + "-" + identity + ".png");
-            using var output = File.Create(path); image.Position = 0; image.CopyTo(output);
-        }
-        File.WriteAllText(Path.Combine(folder, "primary-resource.json"), JsonConvert.SerializeObject(new
-        {
-            group.ResourcePath, MainFile = Path.GetFileName(file), Meshes = model.MeshList.Count,
-            SubAssets = group.Members, Animations = model.AnimationList.Select(a => a.Name).ToArray()
-        }, Formatting.Indented));
+        // Native FBX materials and their referenced textures are already exported together.
+        // Do not emit per-resource reports or unrelated CAB dependency dumps here.
         return new PrimaryExportResult([file], model.AnimationList.Count);
     }
 

@@ -79,7 +79,7 @@ internal static partial class DirectoryExportWorker
                 var client = await available.Reader.ReadAsync(cancellation);
                 try { return await client.ExportAsync(group, folder, cancellation).ConfigureAwait(false); }
                 finally { available.Writer.TryWrite(client); }
-            }, report, token, count);
+            }, report, token, count, context.ExportLogDirectory);
         }
         finally { foreach (var client in clients) client.Dispose(); }
     }

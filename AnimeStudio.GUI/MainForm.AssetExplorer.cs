@@ -116,53 +116,26 @@ partial class MainForm
             string output, CancellationToken token)
         {
             if (content.Main == null) throw new InvalidDataException("没有找到主资源对象。");
-            var members = content.Members;
-            var mainFiles = new List<string>();
-            if (members.Length == 1 && content.Main is not GameObject and not MonoBehaviour)
+            token.ThrowIfCancellationRequested();
+            // There is no general writer for Unity prefab/asset/material files. Do not disguise
+            // JSON or raw object bytes as a successfully reconstructed source resource.
+            if (content.Members.Length != 1 || content.Main is not (Texture2D or AudioClip or TextAsset or AnimeStudio.Font or Mesh or VideoClip or MovieTexture or Sprite or Shader or AnimationClip))
+                return PrimaryExportResult.Skip("该主资源或复合资源暂不支持还原为可用文件，已跳过（不生成替代 JSON）：" + group.ResourcePath);
+            var item = new AssetItem(content.Main)
             {
-                var item = new AssetItem(content.Main) { Text = ResourcePaths.SafeSegment(Path.GetFileNameWithoutExtension(group.ResourcePath)) };
-                if (!Exporter.ExportConvertFile(item, output + Path.DirectorySeparatorChar))
-                    if (!Exporter.ExportRawFile(item, output + Path.DirectorySeparatorChar)) throw new IOException("主资源未能导出。");
-                mainFiles.AddRange(Directory.GetFiles(output).Where(p => Path.GetFileName(p) != "export-incomplete.txt"));
-            }
-            else
+                Text = ResourcePaths.OutputSegment(Path.GetFileNameWithoutExtension(group.ResourcePath)),
+                Container = group.ResourcePath
+            };
+            // Text payloads already are the source data; keep their original extension even if
+            // the general Studio exporter is configured to use .txt instead.
+            if (content.Main is TextAsset text)
             {
-                // Composite Unity assets have no general native-file writer. Preserve the primary
-                // object and all its subasset data in one JSON document instead of scattering them.
-                var file = Path.Combine(output, ResourcePaths.SafeSegment(Path.GetFileName(group.ResourcePath)) + ".json");
-                using var text = File.CreateText(file);
-                using var writer = new JsonTextWriter(text) { Formatting = Formatting.Indented };
-                var serializer = new JsonSerializer();
-                writer.WriteStartObject();
-                writer.WritePropertyName("ResourcePath"); writer.WriteValue(group.ResourcePath);
-                writer.WritePropertyName("MainPathID"); writer.WriteValue(content.Main.m_PathID);
-                writer.WritePropertyName("Assets"); writer.WriteStartArray();
-                foreach (var asset in members)
-                {
-                    token.ThrowIfCancellationRequested();
-                    writer.WriteStartObject();
-                    writer.WritePropertyName("PathID"); writer.WriteValue(asset.m_PathID);
-                    writer.WritePropertyName("Type"); writer.WriteValue(asset.type.ToString());
-                    writer.WritePropertyName("Name"); writer.WriteValue(asset.Name);
-                    writer.WritePropertyName("Source"); serializer.Serialize(writer, PrimaryAssetResolver.Reference(asset));
-                    writer.WritePropertyName("Data"); serializer.Serialize(writer, (object)asset.ToType() ?? asset);
-                    writer.WritePropertyName("RawData"); writer.WriteValue(Convert.ToBase64String(asset.GetRawData()));
-                    byte[] payload = asset switch
-                    {
-                        Texture2D texture => texture.image_data.GetData(),
-                        AudioClip audio => audio.m_AudioData.GetData(),
-                        VideoClip video => video.m_VideoData.GetData(),
-                        _ => null
-                    };
-                    if (payload != null) { writer.WritePropertyName("ResourceData"); writer.WriteValue(payload); }
-                    writer.WriteEndObject();
-                }
-                writer.WriteEndArray(); writer.WriteEndObject();
-                mainFiles.Add(file);
+                var file = Path.Combine(output, ResourcePaths.OutputSegment(Path.GetFileName(group.ResourcePath)));
+                File.WriteAllBytes(file, text.m_Script);
+                return new([file]);
             }
-            File.WriteAllText(Path.Combine(output, "primary-resource.json"), JsonConvert.SerializeObject(new
-                { group.ResourcePath, SubAssets = group.Members, MainFiles = mainFiles.Select(Path.GetFileName).ToArray() }, Formatting.Indented));
-            return new(mainFiles.ToArray());
+            if (!Exporter.ExportConvertFile(item, output + Path.DirectorySeparatorChar)) throw new IOException("主资源未能转换为可用文件。");
+            return new(Directory.GetFiles(output));
         }
 
         private static ModelExportService.Options GetModelOptions()
