@@ -204,7 +204,9 @@ public static partial class FbxBinaryOptimizer
         private readonly bool wide = version >= 7500;
         private int HeaderSize => wide ? 25 : 13;
         private byte[] footer;
-        public bool HasStandardFooter => footer.Length >= 160 && footer.Length <= 175 &&
+        // The SDK writes a full 16-byte pad when the footer id is already aligned,
+        // so a standard footer can reach 176 bytes.
+        public bool HasStandardFooter => footer.Length >= 160 && footer.Length <= 176 &&
             BinaryPrimitives.ReadInt32LittleEndian(footer.AsSpan(footer.Length - 140, 4)) == version &&
             footer.AsSpan(16, footer.Length - 156).IndexOfAnyExcept((byte)0) < 0 &&
             footer.AsSpan(footer.Length - 136, 120).IndexOfAnyExcept((byte)0) < 0;
