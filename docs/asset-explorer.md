@@ -15,7 +15,7 @@ Studio 内的新入口：**Maps → Open Asset Explorer (Fast)**。原来的 Ass
 
 一键 FBX 导出会收集模型层级、同 CAB 动画、AnimatorController/OverrideController 引用，以及额外选中的 AnimationClip。它强制启用 FBX 动画和蒙皮，其他 FBX 参数沿用 Studio 的 Export Options。
 
-ZZZ 的部分原始模型（例如 `Avatar_Female_Size02_Remielle_Origin_Model.fbx`）只保存骨架，Renderer 的 Mesh 指针被清空。新工具会从当前清单查找 `DiscreteMeshAssets/<模型版本>/<部件>.mesh`，验证资源路径或 container hash，加载并绑定分离网格；不会拿同名的其他皮肤或 LOD 替代。请使用完整清单。模型源文件本身没有动画或控制器引用时，需把需要的 AnimationClip 加入导出列表。
+ZZZ 的部分原始模型（例如 `Avatar_Female_Size02_Remielle_Origin_Model.fbx`）只保存骨架，Renderer 的 Mesh 指针被清空。新工具会从当前清单查找 `DiscreteMeshAssets/<模型版本>/<部件>.mesh`，验证资源路径或 container hash，加载并绑定分离网格；清单里以 `SeparateMesh_<模型>_<部件>.mesh` 命名的网格同样能找到，不会拿同名的其他皮肤或 LOD 替代。请使用完整清单。模型源文件本身没有动画或控制器引用时，需把需要的 AnimationClip 加入导出列表。
 
 每个模型输出到独立文件夹，包含 FBX、材质 JSON、PNG 贴图和 `export-report.json`。ZZZ 有些材质/贴图在运行时绑定，因此额外保存加载到的 CAB 依赖材质和贴图；不会猜测这些动态绑定的着色器连接。依赖集中可能包括共享效果贴图。缺失依赖、找不到所选对象、指定动画没有有效轨道或贴图转换失败会明确报错。失败/取消后的文件夹保留 `export-incomplete.txt`，不可视为完整导出。
 
@@ -68,6 +68,25 @@ Asset Explorer 的单模型和目录 FBX 导出自动启用无损整理，保留
 
 测试入口：`tests/compare_fbx_lossless.py` 比较压缩前后的 FBX 解码数据；`tests/UnityFbxValidation/Editor/FbxLosslessValidation.cs` 在临时 Unity 工程中进行零容差动画比较。常规回归另外覆盖细微动作、非零切线、空曲线引用、FBX 7300/7500、幂等性及失败不覆盖原文件。
 
+FBX SDK 把尾部标识补齐到 16 字节边界时，已对齐的文件会再补满 16 字节，尾部总长为 176 字节。此前优化器只接受 160 到 175 字节，遇到这种文件会整体跳过：不压缩，也不写 take 的时间范围，而原生导出器本身不设置时间范围，这些文件的所有 take 导入 Unity 后都是 0 帧。现在接受 176 字节，测试项目用合成文件覆盖这种尾部。
+
+2026-10-11 验收：Anbi 46 个动画 FBX 共 67 个 take，此前 Die、Revive、Idle、TurnBack、Hit_Shake 所在的 4 个文件共 8 个 take 时间范围为 0，修复后全部正常；Die.fbx 由 8,047,632 字节减至 4,863,504 字节。同时复核旧版 clip 的解码：主 clip 第 0 帧的 143 根骨骼旋转、平移、缩放与动画文件自身节点姿势逐骨骼一致，帧间连续，曲线数、时间范围、欧拉角连续性与 Remielle 的新版 clip 相当，分离网格的骨骼列表与网格 m_BoneNameHashes 逐位一致。
+## ZZZ 旧版动画 ACL 兼容
+
+部分 ZZZ 旧动画（例如 Anbi `Animation/` 目录的战斗动作）的 ACL 数据仍是旧版布局：transform 段和 scalar 段都是 v02_01_99(8)，不带 database；较新的内容（MainCityAnimation、Remielle 等）scalar 段是 vHoYo(100)。ZZZV2 原生解码库只接受 vHoYo 的 scalar 段，其余版本会在 `has_database` 断言处直接终止进程（该库编译为断言即 abort），导出工作进程随之退出，目录导出记录为“导出工作进程意外退出：Transform tracks only”。
+
+`ACLExtensions.Process` 现在按 scalar 段头部的版本号分流：vHoYo 走 ZZZV2 解码器，其它版本走原 ZZZ 解码器，由后者从整段 clip 数据解出 transform 和 scalar 曲线。没有 scalar 段或没有 ACL 数据的 clip 行为不变。不能用全局关闭 `USE_ZZZ_ACL_V2` 代替：原解码器不认 vHoYo 的 scalar 段，会少解 58 条曲线并触发曲线数校验。
+
+测试项目新增 `--probe-acl <输出目录> <清单> <CABMap> <资源目录> <FBX 文件名> [--legacy]`，直接调用与导出相同的解码入口，打印每段 ACL 缓冲区的版本、轨道类型和数量；`--legacy` 强制走原 ZZZ 解码器用于对照。
+
+2026-10-11 本机验收：Anbi `Animation/` 目录 46 个 FBX 通过真实工作进程目录导出全部成功，共 67 段动画，此前其中 44 个因该断言失败；Branch_04、Die 等旧版 clip 解出的帧数乘曲线数与声明一致；MainCity_Idle01 和 Remielle Attack_Normal_01 继续走 V2 解码器并通过既有回归检查。
+## ZZZ 分离网格命名兼容
+
+清单里的分离网格有两种命名：`DiscreteMeshAssets/<模型>/<部件>.mesh`（例如 Remielle）和 `DiscreteMeshAssets/<模型>/SeparateMesh_<模型>_<部件>.mesh`（例如 Anbi 等早期角色），而这些模型的渲染器上都没有 NapLodController 路径，只能按默认规则拼出 `<部件>.mesh`。此前查找只做了带前缀到去前缀的单向兼容，Anbi 模型因此报“清单缺少 6 个分离网格”。现在先按原路径查找，找不到再按目录名拼出另一种命名；LOD 变体文件名不同，不会误选。同一网格的多份物理副本只要 Name 和 PathID 一致就视为同一对象。
+
+测试项目新增 `--probe-mesh <输出目录> <清单> <CABMap> <资源目录> <FBX 文件名>`，打印模型里每个渲染器的网格指针状态、MonoBehaviour 中出现的资源路径、FindBindings 的结果以及两种命名在清单中的命中情况。
+
+2026-10-11 本机验收：`Avatar_Female_Size02_Anbi_Model.fbx` 通过真实工作进程目录导出成功，6 个分离网格全部绑定并写入 FBX；Remielle Origin 模型回归项和全部 112 项回归检查通过。
 ## 索引与路径
 
 - 首次导入大清单会生成压缩二进制缓存；之后按源文件路径、大小和修改时间验证缓存。表格采用 ListView VirtualMode，不为数百万条结果创建 UI 行对象。

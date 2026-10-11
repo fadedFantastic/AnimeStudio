@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Text;
 using AnimeStudio;
 using AnimeStudio.AssetExplorer;
@@ -117,6 +117,368 @@ if (args.FirstOrDefault() == "--catalog-find")
     File.WriteAllText(Path.Combine(output, "matches.json"), JsonConvert.SerializeObject(rows, Formatting.Indented));
     Console.WriteLine($"MATCHES {rows.Length}: " + string.Join(", ", rows.GroupBy(r => r.Type).Select(g => $"{g.Key}={g.Count()}")));
     foreach (var row in rows.Take(12)) Console.WriteLine(JsonConvert.SerializeObject(row));
+    return;
+}
+
+if (args.FirstOrDefault() == "--probe-acl")
+{
+    if (args.Length > 6 && args[6] == "--legacy") USE_ZZZ_ACL_V2.enabled = false;
+    var probeStore = AssetIndexStore.Load(args[2], output, Console.WriteLine, default);
+    foreach (var probeDictionary in new[] { "Z3-AssetIndex-Eleiyas.json", "Z3-AssetIndex-Recovered.json" })
+    {
+        var probeDictionaryPath = Path.Combine(Path.GetDirectoryName(args[3]), probeDictionary);
+        if (File.Exists(probeDictionaryPath)) probeStore.ApplyPathDict(JsonConvert.DeserializeObject<Dictionary<ulong, string>>(File.ReadAllText(probeDictionaryPath)));
+    }
+    var probePlan = probeStore.CollectDirectory(args[4], true, default);
+    var probeTarget = probePlan.Groups.Single(g => Path.GetFileName(g.ResourcePath).Equals(args[5], StringComparison.OrdinalIgnoreCase));
+    Console.WriteLine($"GROUP {probeTarget.ResourcePath} members={probeTarget.Members.Length}: " + string.Join(", ", probeTarget.Members.Select(m => m.Name)));
+    var probeContext = new CatalogRequest(probeStore.Game, probeTarget.Members, args[3], "");
+    var probeMap = CabCatalog.Read(probeContext.CabMap, default);
+    var probeRequest = probeContext with { Assets = probeTarget.Members };
+    var probeLoad = CabCatalog.Plan(probeRequest, default, probeMap);
+    if (probeLoad.Missing.Length > 0) throw new FileNotFoundException(string.Join(Environment.NewLine, probeLoad.Missing));
+    var probeManager = new AssetsManager { Game = GameManager.GetGameByType(probeRequest.Game), ResolveDependencies = false, FilterData = new() { Items = probeLoad.Offsets.ToList() } };
+    probeManager.LoadFiles(probeLoad.Files, mergeSplitAssets: false);
+    probeManager.FilterData.Items.Clear();
+    var probeContent = PrimaryAssetResolver.Resolve(probeManager, probeTarget, probeLoad.Selected);
+    var probeDump = new List<string>();
+    foreach (var probeClip in probeContent.Clips)
+    {
+        var pClip = probeClip.m_MuscleClip.m_Clip;
+        var pAcl = pClip.m_ACLClip;
+        probeDump.Add($"clip {probeClip.Name}: aclType={pAcl.GetType().Name} isSet={pAcl.IsSet} curves={pAcl.CurveCount} streamed={pClip.m_StreamedClip?.data?.Length ?? 0} dense={pClip.m_DenseClip?.m_CurveCount ?? 0} constant={pClip.m_ConstantClip?.data?.Length ?? 0}");
+        probeDump.Add($"  timing: sampleRate={probeClip.m_SampleRate} muscleStart={probeClip.m_MuscleClip.m_StartTime} muscleStop={probeClip.m_MuscleClip.m_StopTime} loopTime={probeClip.m_MuscleClip.m_LoopTime}");
+        if (pAcl is MHYACLClip pMhy)
+        {
+            probeDump.Add($"  clipData={pMhy.m_ClipData?.Length ?? 0} curveCount={pMhy.m_CurveCount} constCurveCount={pMhy.m_ConstCurveCount} dbMeta={pMhy.m_databaseData?.Length ?? 0}");
+            if (pMhy.m_ClipData != null && pMhy.m_ClipData.Length >= 32)
+            {
+                AclProbe.DumpBuffer(probeDump, "  buf0", pMhy.m_ClipData, 0);
+                var probeSize0 = (int)BitConverter.ToUInt32(pMhy.m_ClipData, 0);
+                AclProbe.DumpBuffer(probeDump, "  buf1", pMhy.m_ClipData, 16 * ((probeSize0 + 15) / 16));
+            }
+        }
+        if (pAcl is ZZZACLClip pZzz) probeDump.Add($"  bulkData={pZzz.m_DatabaseData?.Length ?? 0}");
+    }
+    if (probeContent.Clips.Length == 0) probeDump.Add("NO CLIPS RESOLVED");
+    foreach (var probeLine in probeDump) Console.WriteLine(probeLine);
+    File.WriteAllLines(Path.Combine(output, "acl-dump.txt"), probeDump);
+    Console.Out.Flush();
+    Logger.Silent = true;
+    foreach (var probeClip in probeContent.Clips)
+    {
+        var pAcl = probeClip.m_MuscleClip.m_Clip.m_ACLClip;
+        if (!pAcl.IsSet) { Console.WriteLine($"SKIP {probeClip.Name} (no ACL data)"); continue; }
+        Console.WriteLine($"PROCESS {probeClip.Name} ...");
+        Console.Out.Flush();
+        try
+        {
+            pAcl.Process(probeManager.Game, out var probeValues, out var probeTimes);
+            Console.WriteLine($"DECODED {probeClip.Name}: times={probeTimes.Length} values={probeValues.Length} curves={pAcl.CurveCount}");
+            if (pAcl is MHYACLClip rqClip && rqClip.m_ClipData != null && rqClip.m_ClipData.Length >= 32 && probeTimes.Length > 1)
+            {
+                var rqTracks = (int)BitConverter.ToUInt32(rqClip.m_ClipData, 16);
+                var rqStride = (int)pAcl.CurveCount;
+                if (rqTracks * 10 <= rqStride && (long)rqStride * probeTimes.Length == probeValues.LongLength)
+                {
+                    double rqDot = 0; long rqPairs = 0, rqBadNorm = 0;
+                    for (var rqT = 0; rqT + 1 < probeTimes.Length; rqT++)
+                        for (var rqK = 0; rqK < rqTracks; rqK++)
+                        {
+                            var qa = rqT * rqStride + rqK * 10; var qb = qa + rqStride;
+                            double ax = probeValues[qa], ay = probeValues[qa + 1], az = probeValues[qa + 2], aw = probeValues[qa + 3];
+                            double bx = probeValues[qb], by = probeValues[qb + 1], bz = probeValues[qb + 2], bw = probeValues[qb + 3];
+                            if (Math.Abs(Math.Sqrt(ax * ax + ay * ay + az * az + aw * aw) - 1) > 0.01) rqBadNorm++;
+                            rqDot += Math.Abs(ax * bx + ay * by + az * bz + aw * bw); rqPairs++;
+                        }
+                    Console.WriteLine($"  rotation continuity: mean |dot(q_t, q_t+1)| = {rqDot / Math.Max(1, rqPairs):F4} over {rqPairs} pairs, non-unit quats = {rqBadNorm}, transform tracks = {rqTracks}");
+                    Console.WriteLine($"  track0 f0 q=({probeValues[0]:F3}, {probeValues[1]:F3}, {probeValues[2]:F3}, {probeValues[3]:F3}) pos=({probeValues[4]:F3}, {probeValues[5]:F3}, {probeValues[6]:F3}) scale=({probeValues[7]:F3}, {probeValues[8]:F3}, {probeValues[9]:F3}); f1 q=({probeValues[rqStride]:F3}, {probeValues[rqStride + 1]:F3}, {probeValues[rqStride + 2]:F3}, {probeValues[rqStride + 3]:F3})");
+                }
+            }
+        }
+        catch (Exception ex) { Console.WriteLine($"DECODE FAILED {probeClip.Name}: {ex.GetBaseException().Message}"); }
+        Console.Out.Flush();
+    }
+    return;
+}
+
+if (args.FirstOrDefault() == "--probe-mesh")
+{
+    var pmStore = AssetIndexStore.Load(args[2], output, Console.WriteLine, default);
+    foreach (var pmDictionary in new[] { "Z3-AssetIndex-Eleiyas.json", "Z3-AssetIndex-Recovered.json" })
+    {
+        var pmDictionaryPath = Path.Combine(Path.GetDirectoryName(args[3]), pmDictionary);
+        if (File.Exists(pmDictionaryPath)) pmStore.ApplyPathDict(JsonConvert.DeserializeObject<Dictionary<ulong, string>>(File.ReadAllText(pmDictionaryPath)));
+    }
+    var pmPlan = pmStore.CollectDirectory(args[4], true, default);
+    var pmTarget = pmPlan.Groups.Single(g => Path.GetFileName(g.ResourcePath).Equals(args[5], StringComparison.OrdinalIgnoreCase));
+    Console.WriteLine($"GROUP {pmTarget.ResourcePath} members={pmTarget.Members.Length}: " + string.Join(", ", pmTarget.Members.Select(m => $"{m.Type}:{m.Name}")));
+    var pmContext = new CatalogRequest(pmStore.Game, pmTarget.Members, args[3], "") { MeshCatalog = pmStore };
+    var pmMap = CabCatalog.Read(pmContext.CabMap, default);
+    var pmLoad = CabCatalog.Plan(pmContext, default, pmMap);
+    if (pmLoad.Missing.Length > 0) throw new FileNotFoundException(string.Join(Environment.NewLine, pmLoad.Missing));
+    var pmManager = new AssetsManager { Game = GameManager.GetGameByType(pmContext.Game), ResolveDependencies = false, FilterData = new() { Items = pmLoad.Offsets.ToList() } };
+    pmManager.LoadFiles(pmLoad.Files, mergeSplitAssets: false);
+    pmManager.FilterData.Items.Clear();
+    var pmRegex = new System.Text.RegularExpressions.Regex("Assets[/" + (char)92 + "][ !#-~]{1,2048}?[.][A-Za-z0-9]{1,8}", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+    foreach (var pmFile in pmManager.assetsFileList)
+        foreach (var pmGo in pmFile.Objects.OfType<GameObject>())
+        {
+            var pmParent = pmGo.m_Transform?.m_Father.TryGet(out var pmParentT) == true && pmParentT.m_GameObject.TryGet(out var pmParentGo) ? pmParentGo.Name : "<root>";
+            var pmRenderer = (AnimeStudio.Object)pmGo.m_SkinnedMeshRenderer ?? pmGo.m_MeshFilter;
+            string pmState = pmRenderer == null ? "" : pmRenderer switch
+            {
+                SkinnedMeshRenderer smr => smr.m_Mesh.IsNull ? " SMR:mesh=NULL" : " SMR:mesh=set",
+                MeshFilter mf => mf.m_Mesh.IsNull ? " MF:mesh=NULL" : " MF:mesh=set",
+                _ => ""
+            };
+            var pmBehaviours = new List<string>();
+            foreach (var mbPtr in pmGo.m_Components)
+            {
+                if (!mbPtr.TryGet<MonoBehaviour>(out var mb)) continue;
+                var mbClass = mb.m_Script.TryGet(out var mbScript) ? mbScript.m_ClassName : "?";
+                var mbRaw = mb.GetRawData();
+                var mbHits = pmRegex.Matches(System.Text.Encoding.UTF8.GetString(mbRaw)).Select(m => m.Value.Replace((char)92, '/')).Distinct().ToArray();
+                pmBehaviours.Add($"{mbClass}/{mb.Name}[{mbRaw.Length}B]" + (mbHits.Length > 0 ? " paths=" + string.Join(" | ", mbHits) : ""));
+            }
+            if (pmRenderer != null || pmBehaviours.Count > 0)
+                Console.WriteLine($"GO {pmGo.Name} (parent={pmParent}){pmState}" + (pmBehaviours.Count > 0 ? " MB: " + string.Join(" ; ", pmBehaviours) : ""));
+        }
+    var pmBindings = SeparateMeshSupport.FindBindings(pmManager, pmLoad.Selected, default);
+    Console.WriteLine($"BINDINGS {pmBindings.Count}");
+    var pmCandidates = new List<string>();
+    foreach (var pmBinding in pmBindings)
+    {
+        var pmSlash = pmBinding.Path.LastIndexOf('/');
+        var pmDir = pmBinding.Path[..pmSlash]; var pmFileName = pmBinding.Path[(pmSlash + 1)..];
+        var pmModel = pmDir[(pmDir.LastIndexOf('/') + 1)..];
+        var pmPrefixed = pmFileName.StartsWith("SeparateMesh_", StringComparison.OrdinalIgnoreCase) ? pmBinding.Path : $"{pmDir}/SeparateMesh_{pmModel}_{pmFileName}";
+        var pmPlain = pmFileName.StartsWith("SeparateMesh_", StringComparison.OrdinalIgnoreCase) ? $"{pmDir}/{pmBinding.Component.Name}.mesh" : pmBinding.Path;
+        Console.WriteLine($"  binding {pmBinding.Component.Type}:{pmBinding.Component.Name} -> {pmBinding.Path}");
+        pmCandidates.Add(pmPlain); pmCandidates.Add(pmPrefixed);
+    }
+    var pmFound = pmStore.FindMeshes(pmCandidates.Distinct(), default);
+    foreach (var pmCandidate in pmCandidates.Distinct())
+    {
+        var pmRows = pmFound.GetValueOrDefault(pmCandidate) ?? [];
+        Console.WriteLine($"  lookup {Path.GetFileName(pmCandidate)}: {pmRows.Length} rows" + (pmRows.Length > 0 ? " -> " + string.Join(" | ", pmRows.Select(r => $"{r.Name}#{r.PathID}@{Path.GetFileName(r.Source)}:{r.Offset}")) : ""));
+    }
+    return;
+}
+
+if (args.FirstOrDefault() == "--probe-pose")
+{
+    var ppStore = AssetIndexStore.Load(args[2], output, Console.WriteLine, default);
+    foreach (var ppDictionary in new[] { "Z3-AssetIndex-Eleiyas.json", "Z3-AssetIndex-Recovered.json" })
+    {
+        var ppDictionaryPath = Path.Combine(Path.GetDirectoryName(args[3]), ppDictionary);
+        if (File.Exists(ppDictionaryPath)) ppStore.ApplyPathDict(JsonConvert.DeserializeObject<Dictionary<ulong, string>>(File.ReadAllText(ppDictionaryPath)));
+    }
+    var ppPlan = ppStore.CollectDirectory(args[4], true, default);
+    var ppTarget = ppPlan.Groups.Single(g => Path.GetFileName(g.ResourcePath).Equals(args[5], StringComparison.OrdinalIgnoreCase));
+    var ppContext = new CatalogRequest(ppStore.Game, ppTarget.Members, args[3], "");
+    var ppMap = CabCatalog.Read(ppContext.CabMap, default);
+    var ppLoad = CabCatalog.Plan(ppContext, default, ppMap);
+    if (ppLoad.Missing.Length > 0) throw new FileNotFoundException(string.Join(Environment.NewLine, ppLoad.Missing));
+    var ppManager = new AssetsManager { Game = GameManager.GetGameByType(ppContext.Game), ResolveDependencies = false, FilterData = new() { Items = ppLoad.Offsets.ToList() } };
+    ppManager.LoadFiles(ppLoad.Files, mergeSplitAssets: false);
+    ppManager.FilterData.Items.Clear();
+    var ppContent = PrimaryAssetResolver.Resolve(ppManager, ppTarget, ppLoad.Selected);
+    Logger.Silent = true;
+    var ppOptions = new ModelConverter.Options { game = ppManager.Game, collectAnimations = false, imageFormat = ImageFormat.Png, exportMaterials = false, materials = new HashSet<Material>(), uvs = new(), texs = new() };
+    var ppModel = ppContent.Roots.Length == 1
+        ? new ModelConverter(ppContent.Roots[0], ppOptions, ppContent.Clips)
+        : new ModelConverter(Path.GetFileNameWithoutExtension(ppTarget.ResourcePath), ppContent.Roots.ToList(), ppOptions, ppContent.Clips);
+    Console.WriteLine($"MODEL {Path.GetFileName(ppTarget.ResourcePath)}: roots={ppContent.Roots.Length} clips={ppContent.Clips.Length} animations={ppModel.AnimationList.Count}");
+    foreach (var ppAnim in ppModel.AnimationList)
+    {
+        var ppRows = new List<(double Angle, double Dist, string Path)>();
+        var ppUnmatched = 0;
+        foreach (var ppTrack in ppAnim.TrackList)
+        {
+            if (string.IsNullOrEmpty(ppTrack.Path) || ppTrack.Rotations.Count == 0) continue;
+            var ppFrame = ppModel.RootFrame.FindFrameByPath(ppTrack.Path);
+            if (ppFrame == null) { ppUnmatched++; continue; }
+            var ppQ = ppTrack.Rotations[0].value; var ppB = ppFrame.LocalRotation;
+            var ppDot = Math.Abs(ppQ.X * ppB.X + ppQ.Y * ppB.Y + ppQ.Z * ppB.Z + ppQ.W * ppB.W);
+            var ppAngle = 2 * Math.Acos(Math.Min(1.0, ppDot)) * 180 / Math.PI;
+            var ppDist = -1.0;
+            if (ppTrack.Translations.Count > 0)
+            {
+                var ppP = ppTrack.Translations[0].value; var ppC = ppFrame.LocalPosition;
+                ppDist = Math.Sqrt((ppP.X - ppC.X) * (ppP.X - ppC.X) + (ppP.Y - ppC.Y) * (ppP.Y - ppC.Y) + (ppP.Z - ppC.Z) * (ppP.Z - ppC.Z));
+            }
+            ppRows.Add((ppAngle, ppDist, ppTrack.Path));
+        }
+        if (ppRows.Count == 0) { Console.WriteLine($"ANIM {ppAnim.Name}: no rotation tracks matched (unmatched={ppUnmatched})"); continue; }
+        var ppSorted = ppRows.OrderBy(ppR => ppR.Angle).ToList();
+        var ppMean = ppRows.Average(ppR => ppR.Angle); var ppMedian = ppSorted[ppSorted.Count / 2].Angle;
+        var ppUnder15 = ppRows.Count(ppR => ppR.Angle < 15) * 100.0 / ppRows.Count; var ppOver90 = ppRows.Count(ppR => ppR.Angle > 90) * 100.0 / ppRows.Count;
+        var ppDists = ppRows.Where(ppR => ppR.Dist >= 0).Select(ppR => ppR.Dist).ToList();
+        Console.WriteLine($"ANIM {ppAnim.Name}: tracks={ppRows.Count} unmatched={ppUnmatched} | frame0 vs bind rotation: mean={ppMean:F1} median={ppMedian:F1} under15deg={ppUnder15:F0}% over90deg={ppOver90:F0}% | translation dist mean={(ppDists.Count > 0 ? ppDists.Average() : -1):F4} max={(ppDists.Count > 0 ? ppDists.Max() : -1):F4}");
+        foreach (var ppR in ppSorted.TakeLast(3)) Console.WriteLine($"    worst {ppR.Angle:F1}deg {ppR.Path.Split('/').Last()}");
+        var ppScaleF0 = new List<(double Diff, string Path)>(); double ppSMin = double.MaxValue, ppSMax = double.MinValue; var ppWildScaleTracks = 0;
+        foreach (var ppTrack in ppAnim.TrackList)
+        {
+            if (string.IsNullOrEmpty(ppTrack.Path) || ppTrack.Scalings.Count == 0) continue;
+            var ppFrame2 = ppModel.RootFrame.FindFrameByPath(ppTrack.Path);
+            var ppWild = false;
+            foreach (var ppKey in ppTrack.Scalings)
+            {
+                var ppV = ppKey.value;
+                ppSMin = Math.Min(ppSMin, Math.Min(ppV.X, Math.Min(ppV.Y, ppV.Z))); ppSMax = Math.Max(ppSMax, Math.Max(ppV.X, Math.Max(ppV.Y, ppV.Z)));
+                if (Math.Abs(ppV.X - 1) > 0.1 || Math.Abs(ppV.Y - 1) > 0.1 || Math.Abs(ppV.Z - 1) > 0.1) ppWild = true;
+            }
+            if (ppWild) ppWildScaleTracks++;
+            if (ppFrame2 != null)
+            {
+                var ppS0 = ppTrack.Scalings[0].value; var ppBs = ppFrame2.LocalScale;
+                ppScaleF0.Add((Math.Max(Math.Abs(ppS0.X - ppBs.X), Math.Max(Math.Abs(ppS0.Y - ppBs.Y), Math.Abs(ppS0.Z - ppBs.Z))), ppTrack.Path));
+            }
+        }
+        if (ppScaleF0.Count > 0) Console.WriteLine($"    scale: tracks={ppScaleF0.Count} frame0 vs node max diff mean={ppScaleF0.Average(ppX => ppX.Diff):F4} worst={ppScaleF0.Max(ppX => ppX.Diff):F4} | all-frame scale range [{ppSMin:F3}, {ppSMax:F3}] tracks deviating over 10% from 1: {ppWildScaleTracks}");
+        var pqMotion = new List<(double MaxAngle, double MaxMove, string Path)>();
+        foreach (var pqTrack in ppAnim.TrackList)
+        {
+            if (string.IsNullOrEmpty(pqTrack.Path) || pqTrack.Rotations.Count == 0) continue;
+            var pqQ0 = pqTrack.Rotations[0].value; double pqMaxAngle = 0;
+            foreach (var pqKey in pqTrack.Rotations)
+            {
+                var pqQ = pqKey.value;
+                var pqDot = Math.Abs(pqQ.X * pqQ0.X + pqQ.Y * pqQ0.Y + pqQ.Z * pqQ0.Z + pqQ.W * pqQ0.W);
+                pqMaxAngle = Math.Max(pqMaxAngle, 2 * Math.Acos(Math.Min(1.0, pqDot)) * 180 / Math.PI);
+            }
+            double pqMaxMove = 0;
+            if (pqTrack.Translations.Count > 0)
+            {
+                var pqP0 = pqTrack.Translations[0].value;
+                foreach (var pqKey in pqTrack.Translations) { var pqP = pqKey.value; pqMaxMove = Math.Max(pqMaxMove, Math.Sqrt((pqP.X - pqP0.X) * (pqP.X - pqP0.X) + (pqP.Y - pqP0.Y) * (pqP.Y - pqP0.Y) + (pqP.Z - pqP0.Z) * (pqP.Z - pqP0.Z))); }
+            }
+            pqMotion.Add((pqMaxAngle, pqMaxMove, pqTrack.Path));
+        }
+        if (pqMotion.Count > 0)
+        {
+            Console.WriteLine($"    motion: tracks={pqMotion.Count} rot>5deg={pqMotion.Count(pqA => pqA.MaxAngle > 5)} rot>30deg={pqMotion.Count(pqA => pqA.MaxAngle > 30)} rot>90deg={pqMotion.Count(pqA => pqA.MaxAngle > 90)} pos>0.01={pqMotion.Count(pqA => pqA.MaxMove > 0.01)}");
+            foreach (var pqTop in pqMotion.OrderByDescending(pqB => pqB.MaxAngle).Take(6)) Console.WriteLine($"      top {pqTop.MaxAngle:F1}deg move={pqTop.MaxMove:F3} {pqTop.Path.Split('/').Last()}");
+        }
+    }
+    return;
+}
+
+if (args.FirstOrDefault() == "--probe-skeleton")
+{
+    var psStore = AssetIndexStore.Load(args[2], output, Console.WriteLine, default);
+    foreach (var psDictionary in new[] { "Z3-AssetIndex-Eleiyas.json", "Z3-AssetIndex-Recovered.json" })
+    {
+        var psDictionaryPath = Path.Combine(Path.GetDirectoryName(args[3]), psDictionary);
+        if (File.Exists(psDictionaryPath)) psStore.ApplyPathDict(JsonConvert.DeserializeObject<Dictionary<ulong, string>>(File.ReadAllText(psDictionaryPath)));
+    }
+    var psPlan = psStore.CollectDirectory(args[4], true, default);
+    var psTarget = psPlan.Groups.Single(g => Path.GetFileName(g.ResourcePath).Equals(args[5], StringComparison.OrdinalIgnoreCase));
+    var psContext = new CatalogRequest(psStore.Game, psTarget.Members, args[3], "");
+    var psMap = CabCatalog.Read(psContext.CabMap, default);
+    var psLoad = CabCatalog.Plan(psContext, default, psMap);
+    if (psLoad.Missing.Length > 0) throw new FileNotFoundException(string.Join(Environment.NewLine, psLoad.Missing));
+    var psManager = new AssetsManager { Game = GameManager.GetGameByType(psContext.Game), ResolveDependencies = false, FilterData = new() { Items = psLoad.Offsets.ToList() } };
+    psManager.LoadFiles(psLoad.Files, mergeSplitAssets: false);
+    psManager.FilterData.Items.Clear();
+    var psContent = PrimaryAssetResolver.Resolve(psManager, psTarget, psLoad.Selected);
+    var psLines = new List<string>();
+    void PsWalk(GameObject psGo, string psPath)
+    {
+        var psT = psGo.m_Transform;
+        if (psT == null) return;
+        var psP = psT.m_LocalPosition; var psQ = psT.m_LocalRotation; var psS = psT.m_LocalScale;
+        psLines.Add($"{psPath}|{psP.X:R}|{psP.Y:R}|{psP.Z:R}|{psQ.X:R}|{psQ.Y:R}|{psQ.Z:R}|{psQ.W:R}|{psS.X:R}|{psS.Y:R}|{psS.Z:R}");
+        foreach (var psChildPtr in psT.m_Children)
+            if (psChildPtr.TryGet(out var psChildT) && psChildT.m_GameObject.TryGet(out var psChildGo)) PsWalk(psChildGo, psPath + "/" + psChildGo.Name);
+    }
+    foreach (var psRoot in psContent.Roots) PsWalk(psRoot, psRoot.Name);
+    File.WriteAllLines(args[6], psLines);
+    Console.WriteLine($"SKELETON {Path.GetFileName(psTarget.ResourcePath)}: roots={psContent.Roots.Length} nodes={psLines.Count}");
+    return;
+}
+
+if (args.FirstOrDefault() == "--probe-skin")
+{
+    var pkStore = AssetIndexStore.Load(args[2], output, Console.WriteLine, default);
+    foreach (var pkDictionary in new[] { "Z3-AssetIndex-Eleiyas.json", "Z3-AssetIndex-Recovered.json" })
+    {
+        var pkDictionaryPath = Path.Combine(Path.GetDirectoryName(args[3]), pkDictionary);
+        if (File.Exists(pkDictionaryPath)) pkStore.ApplyPathDict(JsonConvert.DeserializeObject<Dictionary<ulong, string>>(File.ReadAllText(pkDictionaryPath)));
+    }
+    var pkPlan = pkStore.CollectDirectory(args[4], true, default);
+    var pkTarget = pkPlan.Groups.Single(g => Path.GetFileName(g.ResourcePath).Equals(args[5], StringComparison.OrdinalIgnoreCase));
+    var pkContext = new CatalogRequest(pkStore.Game, pkTarget.Members, args[3], "") { MeshCatalog = pkStore };
+    var pkMap = CabCatalog.Read(pkContext.CabMap, default);
+    var pkLoad = CabCatalog.Plan(pkContext, default, pkMap);
+    if (pkLoad.Missing.Length > 0) throw new FileNotFoundException(string.Join(Environment.NewLine, pkLoad.Missing));
+    var pkManager = new AssetsManager { Game = GameManager.GetGameByType(pkContext.Game), ResolveDependencies = false, FilterData = new() { Items = pkLoad.Offsets.ToList() } };
+    pkManager.LoadFiles(pkLoad.Files, mergeSplitAssets: false);
+    pkManager.FilterData.Items.Clear();
+    var pkContent = PrimaryAssetResolver.Resolve(pkManager, pkTarget, pkLoad.Selected);
+    var pkWithRoots = pkLoad.Selected.Concat(pkContent.Roots.Select(PrimaryAssetResolver.Reference)).Distinct().ToArray();
+    Logger.Silent = true;
+    var pkBound = SeparateMeshSupport.CompleteLoad(pkManager, pkContext, pkWithRoots, null, default, pkMap);
+    pkContent = PrimaryAssetResolver.Resolve(pkManager, pkTarget, pkLoad.Selected);
+    Console.WriteLine($"SKIN {Path.GetFileName(pkTarget.ResourcePath)}: separate meshes bound={pkBound} roots={pkContent.Roots.Length}");
+    static uint PkCrc(string pkText)
+    {
+        uint pkC = 0xFFFFFFFF;
+        foreach (var pkB in System.Text.Encoding.UTF8.GetBytes(pkText))
+        {
+            pkC ^= pkB;
+            for (var pkK = 0; pkK < 8; pkK++) pkC = (pkC & 1) != 0 ? (pkC >> 1) ^ 0xEDB88320u : pkC >> 1;
+        }
+        return ~pkC;
+    }
+    var pkHashNoRoot = new Dictionary<uint, string>(); var pkHashWithRoot = new Dictionary<uint, string>();
+    void PkWalk(GameObject pkGo, string pkRel, string pkFull)
+    {
+        if (pkGo.m_Transform == null) return;
+        if (pkRel.Length > 0) pkHashNoRoot[PkCrc(pkRel)] = pkRel;
+        pkHashWithRoot[PkCrc(pkFull)] = pkFull;
+        foreach (var pkPtr in pkGo.m_Transform.m_Children)
+            if (pkPtr.TryGet(out var pkChildT) && pkChildT.m_GameObject.TryGet(out var pkChildGo))
+                PkWalk(pkChildGo, pkRel.Length == 0 ? pkChildGo.Name : pkRel + "/" + pkChildGo.Name, pkFull + "/" + pkChildGo.Name);
+    }
+    foreach (var pkRoot in pkContent.Roots) PkWalk(pkRoot, "", pkRoot.Name);
+    string PkPathOf(Transform pkT)
+    {
+        var pkNames = new List<string>(); var pkCur = pkT;
+        while (pkCur != null)
+        {
+            pkCur.m_GameObject.TryGet(out var pkG);
+            var pkHasFather = pkCur.m_Father.TryGet(out var pkFather);
+            if (pkHasFather) pkNames.Insert(0, pkG?.Name ?? "?");
+            pkCur = pkHasFather ? pkFather : null;
+        }
+        return string.Join("/", pkNames);
+    }
+    foreach (var pkFile in pkManager.assetsFileList)
+        foreach (var pkSmr in pkFile.Objects.OfType<SkinnedMeshRenderer>())
+        {
+            pkSmr.m_GameObject.TryGet(out var pkSmrGo);
+            if (!pkSmr.m_Mesh.TryGet(out var pkMesh)) { Console.WriteLine($"  SMR {pkSmrGo?.Name}: mesh unresolved"); continue; }
+            var pkBones = pkSmr.m_Bones; var pkResolved = pkBones.Count(pkBp => pkBp.TryGet(out _));
+            var pkHashes = pkMesh.m_BoneNameHashes ?? Array.Empty<uint>();
+            var pkMaxIndex = pkMesh.m_Skin != null && pkMesh.m_Skin.Count > 0 ? pkMesh.m_Skin.Max(pkS => pkS.boneIndex.Max()) : -1;
+            Console.WriteLine($"  SMR {pkSmrGo?.Name}: mesh={pkMesh.Name} bones={pkBones.Count} resolved={pkResolved} bindposes={pkMesh.m_BindPose?.Length ?? 0} boneHashes={pkHashes.Length} skinVerts={pkMesh.m_Skin?.Count ?? 0} maxBoneIndex={pkMaxIndex}");
+            var pkN = Math.Min(pkBones.Count, pkHashes.Length); int pkMatch = 0, pkMismatch = 0; var pkExamples = new List<string>();
+            for (var pkI = 0; pkI < pkN; pkI++)
+            {
+                if (!pkBones[pkI].TryGet(out var pkT)) continue;
+                var pkRel = PkPathOf(pkT); var pkCrc = PkCrc(pkRel);
+                if (pkCrc == pkHashes[pkI]) { pkMatch++; continue; }
+                pkMismatch++;
+                var pkMeshName = pkHashNoRoot.TryGetValue(pkHashes[pkI], out var pkMn) ? pkMn.Split('/').Last() : (pkHashWithRoot.TryGetValue(pkHashes[pkI], out var pkMn2) ? pkMn2.Split('/').Last() + "(with-root)" : "?");
+                var pkWhere = Array.IndexOf(pkHashes, pkCrc);
+                if (pkExamples.Count < 6) pkExamples.Add($"[{pkI}] smr bone={pkRel.Split('/').Last()} but mesh slot={pkMeshName}; smr bone appears at mesh index {pkWhere}");
+            }
+            var pkResolvable = pkHashes.Count(pkH => pkHashNoRoot.ContainsKey(pkH) || pkHashWithRoot.ContainsKey(pkH));
+            Console.WriteLine($"      order check: index-match={pkMatch} mismatch={pkMismatch} | mesh bone hashes resolvable in skeleton={pkResolvable}/{pkHashes.Length}");
+            foreach (var pkE in pkExamples) Console.WriteLine("      " + pkE);
+        }
     return;
 }
 

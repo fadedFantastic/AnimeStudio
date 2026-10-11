@@ -67,6 +67,11 @@ internal static class FbxOptimizationTests
                 "only unreferenced empty curves are removed; direct and metadata references survive (" + version + ")");
         }
 
+        var padded = Path.Combine(output, "sdk-padded-footer.fbx"); var footerLength = 0;
+        for (var filler = 1; filler <= 16 && footerLength != 176; filler++) footerLength = WriteEmptyFixture(padded, 7300, filler, true);
+        check(footerLength == 176, "fixture reproduces the 176-byte SDK footer");
+        var paddedResult = FbxBinaryOptimizer.Optimize(padded);
+        check(paddedResult.UnusedEmptyCurves == 1 && FbxInspection.Read(padded).CurveIds.Order().SequenceEqual(new long[] { 100, 101 }), "16-byte padded SDK footer is optimized instead of skipped");
         var ascii = Path.Combine(output, "legacy-ascii.fbx"); File.WriteAllText(ascii, "; FBX ASCII fixture");
         var hash = SHA256.HashData(File.ReadAllBytes(ascii)); FbxBinaryOptimizer.Optimize(ascii);
         check(hash.SequenceEqual(SHA256.HashData(File.ReadAllBytes(ascii))), "unsupported FBX formats are left intact");
@@ -77,7 +82,7 @@ internal static class FbxOptimizationTests
     }
 
     private sealed record Stub(string Name, byte[][] Properties, Stub[] Children);
-    private static void WriteEmptyFixture(string path, int version)
+    private static int WriteEmptyFixture(string path, int version, int filler = 0, bool sdkPadding = false)
     {
         byte[] Scalar(char type, Action<BinaryWriter> value)
         {
@@ -98,6 +103,7 @@ internal static class FbxOptimizationTests
             N("Connections", [], N("C", [S("OP"), L(100), L(300), S("d|X")])),
             N("CustomMetadata", [L(101)])
         };
+        if (filler > 0) roots = roots.Append(N("Comment", [S(new string('x', filler))])).ToArray();
         using var output = new BinaryWriter(File.Create(path));
         output.Write(Encoding.ASCII.GetBytes("Kaydara FBX Binary  \0\x1a\0")); output.Write(version);
         var header = version >= 7500 ? 25 : 13;
@@ -116,9 +122,12 @@ internal static class FbxOptimizationTests
         }
         foreach (var root in roots) WriteNode(root);
         output.Write(new byte[header]);
+        var footerStart = output.BaseStream.Position;
         output.Write(Convert.FromHexString("FABC AA0E D7C8 D760 B47F F685 1DF4 277B".Replace(" ", "")));
-        output.Write(new byte[(16 - output.BaseStream.Position % 16) % 16 + 4]);
+        // The FBX SDK writes a full 16-byte pad when the footer id already ends on a boundary; the optimizer writes 0 to 15.
+        output.Write(new byte[(sdkPadding ? 16 - output.BaseStream.Position % 16 : (16 - output.BaseStream.Position % 16) % 16) + 4]);
         output.Write(version); output.Write(new byte[120]);
         output.Write(Convert.FromHexString("F85A8C6ADEF5D97EECE90CE3758F290B"));
+        return (int)(output.BaseStream.Position - footerStart);
     }
 }

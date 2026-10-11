@@ -109,10 +109,15 @@ public static class SeparateMeshSupport
     {
         yield return binding.Path;
         var slash = binding.Path.LastIndexOf('/');
-        // Older NapLodController strings use a SeparateMesh_<model>_ prefix,
-        // while newer catalogs store the same mesh under its component name.
-        if (slash >= 0 && binding.Path[(slash + 1)..].StartsWith("SeparateMesh_", StringComparison.OrdinalIgnoreCase))
-            yield return binding.Path[..(slash + 1)] + binding.Component.Name + ".mesh";
+        if (slash < 0) yield break;
+        var directory = binding.Path[..slash];
+        var file = binding.Path[(slash + 1)..];
+        // 清单里的分离网格有两种命名：<部件>.mesh（例如 Remielle）和 SeparateMesh_<模型>_<部件>.mesh（例如 Anbi），
+        // NapLodController 的字符串也可能是任一种。先按原路径找，找不到再试另一种命名；LOD 变体后缀不同，不会误匹配。
+        if (file.StartsWith("SeparateMesh_", StringComparison.OrdinalIgnoreCase))
+            yield return directory + "/" + binding.Component.Name + ".mesh";
+        else
+            yield return directory + "/SeparateMesh_" + directory[(directory.LastIndexOf('/') + 1)..] + "_" + file;
     }
 
     private static string ReadLodPath(GameObject go)
