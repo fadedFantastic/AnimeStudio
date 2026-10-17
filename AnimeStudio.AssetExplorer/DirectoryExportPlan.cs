@@ -19,6 +19,13 @@ public sealed record DirectoryExportPlan(string Directory, bool Recursive, Prima
         var selected = Groups.Where(g => selectedDirectories.Contains(ResourcePaths.Parent(g.ResourcePath)) && selectedTypes.Contains(g.Extension)).ToArray();
         return this with { Groups = selected, MatchedRows = selected.Sum(g => g.Members.Length), DuplicateRows = 0 };
     }
+
+    // Preview scope: the highlighted directory and everything below it, independent of the check state.
+    public PrimaryAssetGroup[] Within(string directory)
+    {
+        var normalized = ResourcePaths.Normalize(directory);
+        return Groups.Where(g => ResourcePaths.IsWithin(g.ResourcePath, normalized, true)).ToArray();
+    }
 }
 
 public static class ResourcePaths

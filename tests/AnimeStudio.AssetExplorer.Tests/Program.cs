@@ -826,6 +826,8 @@ var selectedPlan = selectionPlan.Select(["Assets/Hero", "assets/hero/ani", "Asse
 Check(selectedPlan.Groups.Select(g => g.ResourcePath).SequenceEqual(new[] { "Assets/Hero/Ani/Idle.fbx", "Assets/Hero/Textures/Body.png" }), "directory and extension multiselect excludes unchecked descendants");
 Check(selectedPlan.Groups[0].Members.Length == 3, "file filtering retains every subasset of a selected FBX");
 Check(selectionPlan.Select([], [".fbx"]).Groups.Length == 0 && selectionPlan.Select(["Assets/Hero"], []).Groups.Length == 0, "empty selection never means export all");
+Check(selectionPlan.Within("Assets/Hero/Ani").Select(g => g.ResourcePath).SequenceEqual(new[] { "Assets/Hero/Ani/Idle.fbx", "Assets/Hero/Ani/Combat/Attack.fbx" }), "preview scope includes the highlighted folder and its descendants");
+Check(selectionPlan.Within("Assets/Hero").Length == 4 && selectionPlan.Within("Assets/Hero/Ani/Combat").Single().ResourcePath == "Assets/Hero/Ani/Combat/Attack.fbx", "preview scope never leaks sibling folders");
 Check(ResourcePaths.OutputPath(output, "Assets/Hero", "Assets/Hero/Ani/Idle.fbx") == Path.Combine(output, "Ani", "Idle.fbx"), "source directory layout has no batch or per-file wrapper");
 var longName = new string('a', 160) + ".fbx";
 Check(ResourcePaths.OutputSegment(longName) == longName, "valid long source names are preserved");

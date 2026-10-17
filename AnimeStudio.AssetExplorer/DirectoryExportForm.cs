@@ -20,6 +20,8 @@ internal sealed class DirectoryExportForm : Form
     private readonly CheckedListBox types = new() { Dock = DockStyle.Fill, CheckOnClick = true, IntegralHeight = false, Name = "fileTypes" };
     private readonly ListView preview = new() { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, VirtualMode = true, Name = "resourcePreview" };
     private DirectoryExportPlan collected, selected;
+    private PrimaryAssetGroup[] visible = [];
+    private string visibleRoot = "";
     private CancellationTokenSource operation;
     private bool updatingChecks;
     private string lastOutput, lastReport;
@@ -54,9 +56,9 @@ internal sealed class DirectoryExportForm : Form
         preview.Columns.Add("相对资源路径", 590); preview.Columns.Add("处理方式", 165); preview.Columns.Add("对象数", 75);
         preview.RetrieveVirtualItem += (_, e) =>
         {
-            if (selected == null || e.ItemIndex >= selected.Groups.Length) { e.Item = new ListViewItem(""); return; }
-            var group = selected.Groups[e.ItemIndex];
-            e.Item = new ListViewItem([group.ResourcePath[(selected.Directory.Length + 1)..], group.IsFbx ? "FBX（含子动画）" : "按可用格式导出", group.Members.Length.ToString()]);
+            if (e.ItemIndex >= visible.Length) { e.Item = new ListViewItem(""); return; }
+            var group = visible[e.ItemIndex];
+            e.Item = new ListViewItem([group.ResourcePath[(visibleRoot.Length + 1)..], group.IsFbx ? "FBX（含子动画）" : "按可用格式导出", group.Members.Length.ToString()]);
         };
         Controls.Add(content); Controls.Add(status); Controls.Add(actions); Controls.Add(pathBar);
         collect.Click += async (_, _) => await CollectAsync();
@@ -74,6 +76,8 @@ internal sealed class DirectoryExportForm : Form
             UpdateSelection();
         };
         types.ItemCheck += (_, _) => { if (!updatingChecks && IsHandleCreated) BeginInvoke(() => UpdateSelection()); };
+        // Highlighting a folder narrows the preview to that folder; the checkboxes still decide what gets exported.
+        folders.AfterSelect += (_, e) => { if (!updatingChecks && e.Node != null) UpdateSelection(); };
         FormClosing += (_, e) => { if (operation != null) { operation.Cancel(); e.Cancel = true; Status("正在取消；任务结束后可关闭窗口。"); } };
     }
 
@@ -107,7 +111,7 @@ internal sealed class DirectoryExportForm : Form
     private void InvalidatePlan()
     {
         updatingChecks = true;
-        try { preview.VirtualListSize = 0; collected = selected = null; folders.Nodes.Clear(); types.Items.Clear(); }
+        try { preview.VirtualListSize = 0; collected = selected = null; visible = []; visibleRoot = ""; folders.Nodes.Clear(); types.Items.Clear(); }
         finally { updatingChecks = false; }
         summary.Text = "根目录已变化，请重新列出目录。";
     }
@@ -135,7 +139,7 @@ internal sealed class DirectoryExportForm : Form
                     parent = node;
                 }
             }
-            folders.Sort(); root.Expand();
+            folders.Sort(); root.Expand(); folders.SelectedNode = root;
             foreach (var type in collected.Groups.GroupBy(g => g.Extension).OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase))
                 types.Items.Add(new FileTypeChoice(type.Key, type.Count()), true);
         }
@@ -148,8 +152,13 @@ internal sealed class DirectoryExportForm : Form
         if (collected == null || updatingChecks || IsDisposed) return;
         selected = collected.Select(Nodes(folders.Nodes).Where(n => n.Checked).Select(n => (string)n.Tag),
             types.CheckedItems.Cast<FileTypeChoice>().Select(t => t.Extension));
-        preview.VirtualListSize = selected.Groups.Length; preview.Invalidate();
-        summary.Text = $"已选 {selected.Groups.Length:N0} / {collected.Groups.Length:N0} 个主资源 · {selected.Groups.Sum(g => g.Members.Length):N0} 个对象" +
+        var scope = folders.SelectedNode?.Tag as string ?? collected.Directory;
+        visibleRoot = scope;
+        visible = collected.Within(scope);
+        preview.VirtualListSize = visible.Length; preview.Invalidate();
+        var scopeLabel = string.Equals(scope, collected.Directory, StringComparison.OrdinalIgnoreCase) ? "整个搜索目录" : scope[(collected.Directory.Length + 1)..];
+        summary.Text = $"预览范围：{scopeLabel} · 当前目录 {visible.Length:N0} 个主资源" +
+            $"\n已选 {selected.Groups.Length:N0} / {collected.Groups.Length:N0} 个主资源 · {selected.Groups.Sum(g => g.Members.Length):N0} 个对象" +
             "\n输出位置对应输入根目录，保留相对目录；FBX 子动画与所需贴图一起导出。";
     }
 
