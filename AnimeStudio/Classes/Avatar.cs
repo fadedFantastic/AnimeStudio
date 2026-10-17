@@ -282,7 +282,9 @@ namespace AnimeStudio
                 m_RootMotionSkeletonIndexArray = reader.ReadInt32Array();
             }
 
-            if (isZZZ)
+            // This ZZZ layout has no extra root-motion flag. Reading one consumes
+            // the first byte of m_TOS's count and shifts the path table by four bytes.
+            if (isZZZ && !reader.serializedType.Match("06FC117CA6D965140CCC18CA840CC1A1"))
             {
                 m_UseNextLevelForRootMotionSkeleton = reader.ReadBoolean();
             }

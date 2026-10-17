@@ -87,6 +87,12 @@ FBX SDK 把尾部标识补齐到 16 字节边界时，已对齐的文件会再�
 测试项目新增 `--probe-mesh <输出目录> <清单> <CABMap> <资源目录> <FBX 文件名>`，打印模型里每个渲染器的网格指针状态、MonoBehaviour 中出现的资源路径、FindBindings 的结果以及两种命名在清单中的命中情况。
 
 2026-10-11 本机验收：`Avatar_Female_Size02_Anbi_Model.fbx` 通过真实工作进程目录导出成功，6 个分离网格全部绑定并写入 FBX；Remielle Origin 模型回归项和全部 112 项回归检查通过。
+## ZZZ Avatar 读取兼容
+
+`Monster_Claymore_Model.fbx` 和 `Monster_Claymore_Model_LOD3.fbx` 的 Avatar 类型哈希为 `06FC117CA6D965140CCC18CA840CC1A1`，该布局没有 `m_UseNextLevelForRootMotionSkeleton` 字段。此前按所有 ZZZ Avatar 都带此字段读取，导致骨骼路径表错位 4 字节，把路径文字当成哈希并触发重复键异常。加载器丢弃 Avatar 后，导出端才报“匹配到 0 个对象，请更新索引”；这两个文件无需重建索引。现在按类型哈希识别该布局，其它 ZZZ 布局继续读取原有字段。
+
+测试入口：`--probe-avatar <输出目录> <清单> <CABMap> <资源目录> <FBX 文件名> [路径字典目录] [--export]`。默认在 CABMap 同目录查找字典；输出底层读取异常、原始对象位置和类型哈希，找不到资源或成员时返回失败。`--export` 会补齐分离网格、生成 FBX 并检查网格和骨架。自动回归覆盖不带标志位、标志位为 false/true 的 ZZZ 布局以及普通 Unity 布局。
+
 ## 索引与路径
 
 - 首次导入大清单会生成压缩二进制缓存；之后按源文件路径、大小和修改时间验证缓存。表格采用 ListView VirtualMode，不为数百万条结果创建 UI 行对象。

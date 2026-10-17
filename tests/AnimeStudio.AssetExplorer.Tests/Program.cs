@@ -482,6 +482,83 @@ if (args.FirstOrDefault() == "--probe-skin")
     return;
 }
 
+if (args.FirstOrDefault() == "--probe-avatar")
+{
+    Logger.Default = new ConsoleLogger();
+    Logger.Silent = false; Logger.Flags = LoggerEvent.Warning | LoggerEvent.Error;
+    var paStore = AssetIndexStore.Load(args[2], output, Console.WriteLine, default);
+    var paDictionaryDirectory = args.Length > 6 && !args[6].StartsWith("--") ? args[6] : Path.GetDirectoryName(args[3]);
+    foreach (var paDictionary in new[] { "Z3-AssetIndex-Eleiyas.json", "Z3-AssetIndex-Recovered.json" })
+    {
+        var paDictionaryPath = Path.Combine(paDictionaryDirectory, paDictionary);
+        if (File.Exists(paDictionaryPath)) paStore.ApplyPathDict(JsonConvert.DeserializeObject<Dictionary<ulong, string>>(File.ReadAllText(paDictionaryPath)));
+    }
+    var paPlan = paStore.CollectDirectory(args[4], true, default);
+    var paMatches = paPlan.Groups.Where(g => Path.GetFileName(g.ResourcePath).Equals(args[5], StringComparison.OrdinalIgnoreCase)).ToArray();
+    if (paMatches.Length == 0)
+    {
+        Console.WriteLine($"NO GROUP for {args[5]}; available:");
+        foreach (var paGroupName in paPlan.Groups.Select(g => g.ResourcePath)) Console.WriteLine("  " + paGroupName);
+        throw new InvalidOperationException("Avatar probe did not find the requested resource.");
+    }
+    var paTarget = paMatches[0];
+    Console.WriteLine($"GROUP {paTarget.ResourcePath} members={paTarget.Members.Length}");
+    foreach (var paMember in paTarget.Members)
+        Console.WriteLine($"  member {paMember.Type}:{paMember.Name}#{paMember.PathID} @ {Path.GetFileName(paMember.Source)}:{paMember.Offset} cab={paMember.Cab}");
+    var paContext = new CatalogRequest(paStore.Game, paTarget.Members, args[3], "");
+    var paLoad = CabCatalog.Plan(paContext, default, CabCatalog.Read(paContext.CabMap, default));
+    if (paLoad.Missing.Length > 0) Console.WriteLine("MISSING " + string.Join(Environment.NewLine, paLoad.Missing));
+    Console.WriteLine("FILES " + string.Join(", ", paLoad.Files.Select(Path.GetFileName)));
+    var paManager = new AssetsManager { Game = GameManager.GetGameByType(paContext.Game), ResolveDependencies = false, FilterData = new() { Items = paLoad.Offsets.ToList() } };
+    try
+    {
+        paManager.LoadFiles(paLoad.Files, mergeSplitAssets: false);
+        paManager.FilterData.Items.Clear();
+        foreach (var paFile in paManager.assetsFileList)
+        {
+            Console.WriteLine($"FILE {Path.GetFileName(paFile.originalPath ?? paFile.fullName)} offset={paFile.offset} cab={paFile.fileName} objects={paFile.Objects.Count}");
+            foreach (var paGroup in paFile.Objects.GroupBy(o => o.type).OrderByDescending(g => g.Count()))
+                Console.WriteLine($"  type {paGroup.Key}={paGroup.Count()}");
+            foreach (var paObj in paFile.Objects.Where(o => paTarget.Members.Any(m => m.PathID == o.m_PathID)))
+                Console.WriteLine($"  PATHID HIT {paObj.type}:{paObj.Name}#{paObj.m_PathID}");
+            foreach (var paInfo in paFile.m_Objects.Where(o => paTarget.Members.Any(m => m.PathID == o.m_PathID)))
+                Console.WriteLine($"  RAW HIT {(ClassIDType)paInfo.classID}#{paInfo.m_PathID} offset={paInfo.byteStart} size={paInfo.byteSize} typeHash={Convert.ToHexString(paInfo.serializedType.m_OldTypeHash)}");
+        }
+        var paFailures = 0;
+        foreach (var paMember in paLoad.Selected)
+        {
+            try
+            {
+                var paFound = CabCatalog.Find(paManager, paMember);
+                Console.WriteLine($"FIND OK {paMember.Type}:{paMember.Name} -> {paFound.Name}");
+                if (paFound is Avatar paAvatar)
+                    Console.WriteLine($"  AVATAR paths={paAvatar.m_TOS.Count} rootMotion={paAvatar.m_HumanDescription?.m_RootMotionBoneName}");
+            }
+            catch (Exception paError) { paFailures++; Console.WriteLine($"FIND FAIL {paMember.Type}:{paMember.Name} -> {paError.Message}"); }
+        }
+        Check(paFailures == 0, "all indexed primary-resource members loaded");
+        if (args.Contains("--export"))
+        {
+            paContext = paContext with { MeshCatalog = paStore };
+            var paContent = PrimaryAssetResolver.Resolve(paManager, paTarget, paLoad.Selected);
+            var paWithRoots = paLoad.Selected.Concat(paContent.Roots.Select(PrimaryAssetResolver.Reference)).Distinct().ToArray();
+            SeparateMeshSupport.CompleteLoad(paManager, paContext, paWithRoots, Console.WriteLine, default);
+            paContent = PrimaryAssetResolver.Resolve(paManager, paTarget, paLoad.Selected);
+            var paOptions = new ModelExportService.Options(new ModelConverter.Options
+                { uvs = Enumerable.Range(0, 8).ToDictionary(i => "UV" + i, i => (i < 2, i < 2 ? i : 0)), texs = new() },
+                new Fbx.ExportOptions { exportAllNodes = true, exportSkins = true, exportAnimations = true, exportBlendShape = true,
+                    boneSize = 10, scaleFactor = 1, fbxVersion = 3, fbxFormat = 0 });
+            var paResult = PrimaryFbxExporter.Export(paManager, paTarget, paContent, output, paOptions, default);
+            Console.WriteLine(JsonConvert.SerializeObject(paResult));
+            var paFbx = FbxInspection.Read(paResult.MainFiles.Single());
+            Check(paFbx.Models.Any(m => m.Type == "Mesh"), "exported FBX contains meshes");
+            Check(paFbx.Models.Any(m => m.Type == "LimbNode"), "exported FBX contains skeleton bones");
+        }
+    }
+    finally { paManager.Clear(); }
+    return;
+}
+
 if (args.FirstOrDefault() == "--worker-crash")
 {
     var gui = System.Reflection.Assembly.LoadFrom(args[2]);
@@ -737,6 +814,7 @@ foreach (var preserve in new[] { false, true })
 var sourceRoot = Path.Combine(output, "relocated"); Directory.CreateDirectory(sourceRoot);
 FbxOptimizationTests.Run(output, Check);
 FbxTimeSpanTests.Run(output, Check);
+AvatarTests.Run(Check);
 var directoryBuilder = new AssetIndexStore.Builder();
 foreach (var asset in new[]
 {
