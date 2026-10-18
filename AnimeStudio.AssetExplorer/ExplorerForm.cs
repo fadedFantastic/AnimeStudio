@@ -7,7 +7,9 @@ public sealed class ExplorerForm : Form
 {
     private readonly IStudioBridge bridge;
     private readonly ExplorerSettings settings;
-    private readonly TextBox search = new() { Width = 360, PlaceholderText = "资源名 / 路径 / blk（忽略大小写）" };
+    private readonly Action<ExplorerSettings> persistSettings;
+    private readonly Action<Exception> reportError;
+    private readonly TextBox search = new() { Width = 360, PlaceholderText = "资源名 / 路径 / blk（忽略大小写）", Name = "resourceSearch" };
     private readonly TextBox block = new() { Width = 160, PlaceholderText = "限定 blk" };
     private readonly ComboBox type = new() { Width = 190, DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly ComboBox game = new() { Width = 120, DropDownStyle = ComboBoxStyle.DropDownList };
@@ -16,36 +18,72 @@ public sealed class ExplorerForm : Form
     private readonly TextBox root = new() { Dock = DockStyle.Fill };
     private readonly TextBox cab = new() { Dock = DockStyle.Fill };
     private readonly TextBox dictionary = new() { Dock = DockStyle.Fill };
-    private readonly Label status = new() { Dock = DockStyle.Bottom, Height = 45, AutoEllipsis = true, Padding = new Padding(8), Text = "打开清单或建立索引" };
+    private readonly Label status = new() { Dock = DockStyle.Bottom, Height = 62, AutoEllipsis = true, Padding = new Padding(8), Text = "打开清单或建立索引", Name = "explorerStatus" };
+    private readonly Panel loadingPanel = new() { Dock = DockStyle.Top, Height = 42, Padding = new Padding(8), Visible = false, Name = "catalogLoading" };
+    private readonly Label loadingLabel = new() { Dock = DockStyle.Fill, AutoEllipsis = true, TextAlign = System.Drawing.ContentAlignment.MiddleLeft };
+    private readonly ProgressBar loadingProgress = new() { Dock = DockStyle.Left, Width = 130, Style = ProgressBarStyle.Marquee, MarqueeAnimationSpeed = 30 };
+    private readonly System.Windows.Forms.Timer loadingTimer = new() { Interval = 1000 };
+    private readonly Stopwatch loadingElapsed = new();
+    private string loadingStage = "";
+    private bool loadingCatalog;
     private readonly Label count = new() { AutoSize = true, Padding = new Padding(8) };
-    private readonly ListView list = new() { Dock = DockStyle.Fill, View = View.Details, VirtualMode = true, FullRowSelect = true, HideSelection = false, MultiSelect = true };
-    private readonly ListBox basketView = new() { Dock = DockStyle.Fill, SelectionMode = SelectionMode.MultiExtended };
+    private readonly ListView list = new() { Dock = DockStyle.Fill, View = View.Details, VirtualMode = true, FullRowSelect = true, HideSelection = false, MultiSelect = true, Name = "searchResults" };
+    private readonly ListBox basketView = new() { Dock = DockStyle.Fill, SelectionMode = SelectionMode.MultiExtended, Name = "exportBasket" };
     private readonly List<CatalogAsset> basket = [];
     private readonly List<Control> busyControls = [];
     private readonly System.Windows.Forms.Timer debounce = new() { Interval = 200 };
     private readonly Button stop = new() { Text = "取消", AutoSize = true, Enabled = false };
+    private readonly TabControl pages = new() { Dock = DockStyle.Fill, Name = "explorerPages" };
+    private readonly TabPage searchPage = new("快速搜索与模型导出");
+    private readonly TabPage directoryPage = new("目录批量导出");
+    private readonly DirectoryExportControl directoryExport;
     private AssetIndexStore store;
     private int[] view = [];
     private CancellationTokenSource operation, query;
     private bool busy;
 
     public ExplorerForm(IStudioBridge bridge, bool autoLoadLast = true)
+        : this(bridge, autoLoadLast, ExplorerSettings.Load(), settings => settings.QueueSave()) { }
+
+    internal ExplorerForm(IStudioBridge bridge, bool autoLoadLast, ExplorerSettings settings, Action<ExplorerSettings> persistSettings, Action<Exception> reportError = null)
     {
         this.bridge = bridge;
-        settings = ExplorerSettings.Load();
-        Text = "Asset Explorer · 快速搜索与模型导出";
-        Width = 1280; Height = 850; MinimumSize = new Size(940, 640);
+        this.settings = settings; this.persistSettings = persistSettings;
+        this.reportError = reportError;
+        directoryExport = new DirectoryExportControl(bridge, DirectoryContext, settings.ResourceDirectory, settings.ExportDirectory, settings.ExportWorkers);
+        Text = "Asset Explorer · 资源搜索与导出";
+        Width = 1280; Height = 850; MinimumSize = new Size(1040, 780);
         AutoScaleMode = AutoScaleMode.Dpi;
         StartPosition = FormStartPosition.CenterParent;
         BuildUi();
+        loadingTimer.Tick += (_, _) => UpdateLoadingLabel();
         root.Text = settings.SourceRoot; cab.Text = settings.CabMap; dictionary.Text = settings.DictionaryDirectory;
         game.Items.AddRange(Enum.GetNames<GameType>()); game.SelectedItem = settings.Game.ToString(); full.Checked = settings.Full;
         Shown += async (_, _) => { if (autoLoadLast && File.Exists(settings.Catalog)) await OpenAsync(settings.Catalog); };
         FormClosing += (_, e) =>
         {
-            if (busy) { operation?.Cancel(); e.Cancel = true; Status("正在取消任务；完成后可关闭窗口。"); return; }
-            query?.Cancel(); SaveSettings(); debounce.Dispose();
+            if (busy || directoryExport.IsBusy) { operation?.Cancel(); directoryExport.CancelOperation(); e.Cancel = true; Status("正在取消任务；完成后可关闭窗口。"); return; }
+            debounce.Stop(); query?.Cancel(); SaveSettings();
+            PrepareClose();
         };
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            operation?.Cancel(); query?.Cancel(); directoryExport.CancelOperation();
+            PrepareClose(); debounce.Dispose(); loadingTimer.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+
+    private void PrepareClose()
+    {
+        // Detach the large virtual lists before WinForms destroys their native handles.
+        if (!list.IsDisposed) list.VirtualListSize = 0;
+        view = []; store = null; basket.Clear();
+        directoryExport.PrepareClose();
     }
 
     private Button Button(string text, Func<Task> action, bool disableWhileBusy = true)
@@ -68,7 +106,7 @@ public sealed class ExplorerForm : Form
         header.Controls.Add(game); header.Controls.Add(full);
         header.Controls.Add(Button("补全路径", RecoverAsync));
         header.Controls.Add(stop);
-        stop.Click += (_, _) => operation?.Cancel();
+        stop.Click += (_, _) => { operation?.Cancel(); directoryExport.CancelOperation(); };
 
         var config = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 3, Padding = new Padding(8) };
         config.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 105));
@@ -109,14 +147,14 @@ public sealed class ExplorerForm : Form
         menu.Items.Add("加入导出列表", null, (_, _) => AddToBasket());
         menu.Items.Add("复制资源路径", null, (_, _) => CopySelected(a => a.Container));
         menu.Items.Add("复制 blk 完整路径", null, (_, _) => CopySelected(a => a.Source));
-        menu.Items.Add("收集/导出所在资源目录…", null, (_, _) => OpenDirectoryExport());
+        menu.Items.Add("收集/导出所在资源目录", null, (_, _) => OpenDirectoryExport());
         list.ContextMenuStrip = menu;
         var actions = Flow();
         actions.Controls.Add(Button("加入导出列表", () => { AddToBasket(); return Task.CompletedTask; }));
         actions.Controls.Add(Button("Load Selected", () => PerformAsync("load")));
         actions.Controls.Add(Button("导出选中资源…", () => PerformAsync("assets")));
         actions.Controls.Add(Button("一键导出 FBX + 动画 + 贴图…", () => PerformAsync("models")));
-        actions.Controls.Add(Button("目录批量导出…", () => { OpenDirectoryExport(); return Task.CompletedTask; }));
+        actions.Controls.Add(Button("目录批量导出", () => { OpenDirectoryExport(); return Task.CompletedTask; }));
         var basketPanel = new Panel { Dock = DockStyle.Bottom, Height = 150, Padding = new Padding(8) };
         var basketBar = Flow();
         basketBar.Controls.Add(new Label { Text = "导出列表（跨搜索保留；非空时优先使用此列表）", AutoSize = true, Padding = new Padding(0, 7, 0, 0) });
@@ -124,10 +162,33 @@ public sealed class ExplorerForm : Form
         { foreach (var i in basketView.SelectedIndices.Cast<int>().OrderByDescending(i => i)) basket.RemoveAt(i); RefreshBasket(); return Task.CompletedTask; }));
         basketBar.Controls.Add(Button("清空", () => { basket.Clear(); RefreshBasket(); return Task.CompletedTask; }));
         basketPanel.Controls.Add(basketView); basketPanel.Controls.Add(basketBar);
+        var searchTop = new Panel { Dock = DockStyle.Top, AutoSize = true };
+        searchTop.Controls.Add(actions); searchTop.Controls.Add(filters);
+        searchPage.Controls.Add(list); searchPage.Controls.Add(basketPanel); searchPage.Controls.Add(searchTop);
+        directoryPage.Controls.Add(directoryExport);
+        pages.TabPages.AddRange([searchPage, directoryPage]);
+        pages.SelectedIndexChanged += (_, _) =>
+        {
+            if (pages.SelectedTab == directoryPage && !directoryExport.IsBusy) directoryExport.SetCatalog(store);
+        };
+        directoryExport.StatusChanged += Status;
+        directoryExport.ErrorOccurred += Error;
+        directoryExport.BusyChanged += _ => { UpdateBusyControls(); SaveSettings(); };
         var top = new Panel { Dock = DockStyle.Top, AutoSize = true };
-        top.Controls.Add(actions); top.Controls.Add(filters); top.Controls.Add(config); top.Controls.Add(header);
-        Controls.Add(list); Controls.Add(basketPanel); Controls.Add(status); Controls.Add(top);
+        top.Controls.Add(config); top.Controls.Add(header);
+        loadingPanel.Controls.Add(loadingLabel); loadingPanel.Controls.Add(loadingProgress);
+        Controls.Add(pages); Controls.Add(status); Controls.Add(loadingPanel); Controls.Add(top);
         busyControls.AddRange([game, full, search, type, block, regex, list, basketView]);
+    }
+
+    private void UpdateBusyControls()
+    {
+        foreach (var control in busyControls) control.Enabled = !busy && !directoryExport.IsBusy;
+        // Directory workers use a snapshot; searching the same catalog remains available.
+        if (!busy && directoryExport.IsBusy)
+            foreach (var control in new Control[] { search, type, block, regex, list }) control.Enabled = true;
+        directoryExport.SetAvailable(!busy);
+        stop.Enabled = busy || directoryExport.IsBusy;
     }
 
     private void ScheduleSearch() { query?.Cancel(); debounce.Stop(); if (!busy) debounce.Start(); }
@@ -153,38 +214,58 @@ public sealed class ExplorerForm : Form
 
     private async Task RunAsync(Func<CancellationToken, Task> action)
     {
-        if (busy) return;
+        if (busy || directoryExport.IsBusy) return;
         busy = true; query?.Cancel(); debounce.Stop();
-        foreach (var control in busyControls) control.Enabled = false;
-        stop.Enabled = true;
+        UpdateBusyControls();
         using var cts = new CancellationTokenSource(); operation = cts;
         try { await action(cts.Token); }
         catch (OperationCanceledException) { Status("任务已取消；已完成的扫描缓存和导出文件保留。"); }
         catch (Exception ex) { Error(ex); }
         finally
         {
-            operation = null; busy = false; stop.Enabled = false;
-            foreach (var control in busyControls) control.Enabled = true;
-            await SearchAsync();
+            operation = null; busy = false;
+            if (!IsDisposed) { UpdateBusyControls(); await SearchAsync(); }
         }
     }
 
-    private Task OpenAsync(string path) => RunAsync(async token =>
+    internal async Task OpenAsync(string path)
     {
-        var loaded = await Task.Run(() => AssetIndexStore.Load(path, Path.Combine(settings.WorkDirectory, "imports"), Status, token), token);
-        var dictionaryPath = dictionary.Text;
-        var paths = await Task.Run(() => LoadDictionary(dictionaryPath), token);
-        await Task.Run(() => loaded.ApplyPathDict(paths), token);
-        store = loaded; view = []; list.VirtualListSize = 0;
-        basket.Clear(); RefreshBasket();
-        type.Items.Clear(); type.Items.AddRange(store.AllTypes); type.SelectedIndex = 0;
-        game.SelectedItem = store.Game.ToString();
-        var discoveredCab = ExplorerSettings.FindCabMap(path);
-        if (string.IsNullOrEmpty(discoveredCab)) discoveredCab = ExplorerSettings.FindCabMap(store.SourcePath);
-        if (!string.IsNullOrEmpty(discoveredCab) || !string.Equals(settings.Catalog, path, StringComparison.OrdinalIgnoreCase)) cab.Text = discoveredCab;
-        settings.Catalog = path;
-        SaveSettings(); Status($"已载入 {store.Count:N0} 条资源。选择模型，直接一键导出；可把额外动画加入导出列表。");
-    });
+        if (busy || directoryExport.IsBusy) return;
+        loadingCatalog = true; loadingPanel.Visible = true;
+        loadingElapsed.Restart(); loadingTimer.Start();
+        Status($"正在加载清单 / 索引：{Path.GetFileName(path)}…");
+        try
+        {
+            await RunAsync(async token =>
+            {
+                var loaded = await Task.Run(() => AssetIndexStore.Load(path, Path.Combine(settings.WorkDirectory, "imports"), Status, token), token);
+                var dictionaryPath = dictionary.Text;
+                Status("正在读取路径字典…");
+                var paths = await Task.Run(() => LoadDictionary(dictionaryPath), token);
+                Status("正在应用路径字典…");
+                await Task.Run(() => loaded.ApplyPathDict(paths), token);
+                token.ThrowIfCancellationRequested();
+                Status("正在准备资源列表…");
+                store = loaded; view = []; list.VirtualListSize = 0;
+                directoryExport.SetCatalog(store);
+                basket.Clear(); RefreshBasket();
+                type.Items.Clear(); type.Items.AddRange(store.AllTypes); type.SelectedIndex = 0;
+                game.SelectedItem = store.Game.ToString();
+                var discoveredCab = ExplorerSettings.FindCabMap(path);
+                if (string.IsNullOrEmpty(discoveredCab)) discoveredCab = ExplorerSettings.FindCabMap(store.SourcePath);
+                if (!string.IsNullOrEmpty(discoveredCab) || !string.Equals(settings.Catalog, path, StringComparison.OrdinalIgnoreCase)) cab.Text = discoveredCab;
+                settings.Catalog = path;
+                SaveSettings(); Status($"已载入 {store.Count:N0} 条资源。选择模型，直接一键导出；可把额外动画加入导出列表。");
+            });
+        }
+        finally
+        {
+            loadingCatalog = false; loadingElapsed.Stop();
+            if (!IsDisposed) { loadingTimer.Stop(); loadingPanel.Visible = false; }
+        }
+    }
+
+    private void UpdateLoadingLabel() => loadingLabel.Text = $"  {loadingStage} · 已用 {loadingElapsed.Elapsed.TotalSeconds:0} 秒";
 
     private Task BuildIndexAsync() => RunAsync(async token =>
     {
@@ -197,6 +278,7 @@ public sealed class ExplorerForm : Form
         var result = await IndexWorker.StartAsync(new(source, settings.WorkDirectory, settings.Game, full.Checked,
             Path.Combine(settings.WorkDirectory, id + ".cancel"), Path.Combine(settings.WorkDirectory, id + ".result.json")), Status, token);
         store = await Task.Run(() => AssetIndexStore.Load(result.Catalog, "", Status, token), token);
+        directoryExport.SetCatalog(store);
         var dictionaryPath = dictionary.Text;
         await Task.Run(() => store.ApplyPathDict(LoadDictionary(dictionaryPath)), token);
         settings.Catalog = result.Catalog; cab.Text = Path.ChangeExtension(result.Catalog, ".bin");
@@ -210,6 +292,7 @@ public sealed class ExplorerForm : Form
     private Task RecoverAsync() => RunAsync(async token =>
     {
         if (store == null) throw new InvalidOperationException("请先打开清单。");
+        directoryExport.SetCatalog(store, invalidate: true);
         var dir = dictionary.Text;
         var result = await Task.Run(() =>
         {
@@ -229,7 +312,7 @@ public sealed class ExplorerForm : Form
 
     private async Task PerformAsync(string mode)
     {
-        if (store == null) return;
+        if (store == null || busy || directoryExport.IsBusy) return;
         var selected = basket.Count > 0 ? basket.ToArray() : Selected();
         if (selected.Length == 0) { Status("请先选择资源或加入导出列表。"); return; }
         var request = new CatalogRequest(Enum.Parse<GameType>(game.Text), selected, cab.Text, root.Text) { MeshCatalog = store };
@@ -238,7 +321,7 @@ public sealed class ExplorerForm : Form
         {
             using var dialog = new FolderBrowserDialog { Description = "选择导出目录", SelectedPath = output, UseDescriptionForTitle = true };
             if (dialog.ShowDialog(this) != DialogResult.OK) return;
-            output = dialog.SelectedPath; settings.ExportDirectory = output;
+            output = dialog.SelectedPath; directoryExport.SetExportDirectory(output);
         }
         SaveSettings();
         var loaded = false;
@@ -256,12 +339,14 @@ public sealed class ExplorerForm : Form
         if (busy) return;
         if (store == null) { Status("请先打开资源清单。"); return; }
         var selectedDirectory = ResourcePaths.Parent(Selected().FirstOrDefault()?.Container);
-        var context = new CatalogRequest(Enum.Parse<GameType>(game.Text), [], cab.Text, root.Text) { MeshCatalog = store, ExportWorkers = settings.ExportWorkers, ExportLogDirectory = Path.Combine(settings.WorkDirectory, "ExportLogs") };
-        using var dialog = new DirectoryExportForm(store, bridge, context,
-            string.IsNullOrEmpty(selectedDirectory) ? settings.ResourceDirectory : selectedDirectory, settings.ExportDirectory);
-        dialog.ShowDialog(this);
-        settings.ExportWorkers = dialog.ExportWorkers; settings.ResourceDirectory = dialog.ResourceDirectory; settings.ExportDirectory = dialog.ExportDirectory; SaveSettings();
+        if (!directoryExport.IsBusy) { directoryExport.SetCatalog(store); directoryExport.SelectDirectory(selectedDirectory); }
+        pages.SelectedTab = directoryPage;
     }
+    private CatalogRequest DirectoryContext() => new(Enum.Parse<GameType>(game.Text), [], cab.Text, root.Text)
+    {
+        MeshCatalog = store, ExportWorkers = directoryExport.ExportWorkers,
+        ExportLogDirectory = Path.Combine(settings.WorkDirectory, "ExportLogs")
+    };
     private void AddToBasket() { if (busy) return; foreach (var a in Selected()) if (!basket.Contains(a)) basket.Add(a); RefreshBasket(); }
     private void RefreshBasket() { basketView.Items.Clear(); basketView.Items.AddRange(basket.Select(a => $"{a.Type}  {a.Name}  · {Path.GetFileName(a.Source)} @ {a.Offset}").ToArray()); }
     private void CopySelected(Func<CatalogAsset, string> get) { var text = string.Join(Environment.NewLine, Selected().Select(get)); if (text.Length > 0) Clipboard.SetText(text); }
@@ -279,13 +364,20 @@ public sealed class ExplorerForm : Form
     private void SaveSettings()
     {
         settings.SourceRoot = root.Text; settings.CabMap = cab.Text; settings.DictionaryDirectory = dictionary.Text;
-        settings.Game = Enum.TryParse<GameType>(game.Text, out var selected) ? selected : GameType.ZZZ; settings.Full = full.Checked; settings.Save();
+        settings.ExportWorkers = directoryExport.ExportWorkers; settings.ResourceDirectory = directoryExport.ResourceDirectory; settings.ExportDirectory = directoryExport.ExportDirectory;
+        settings.Game = Enum.TryParse<GameType>(game.Text, out var selected) ? selected : GameType.ZZZ; settings.Full = full.Checked; persistSettings(settings);
     }
     private void Status(string message)
     {
         if (IsDisposed || !IsHandleCreated) return;
         if (InvokeRequired) { BeginInvoke(() => Status(message)); return; }
+        if (loadingCatalog) { loadingStage = message; UpdateLoadingLabel(); }
         status.Text = message;
     }
-    private void Error(Exception ex) { Status("失败：" + ex.GetBaseException().Message); MessageBox.Show(this, ex.GetBaseException().Message, "Asset Explorer", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+    private void Error(Exception ex)
+    {
+        Status("失败：" + ex.GetBaseException().Message);
+        if (reportError != null) reportError(ex);
+        else MessageBox.Show(this, ex.GetBaseException().Message, "Asset Explorer", MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
 }

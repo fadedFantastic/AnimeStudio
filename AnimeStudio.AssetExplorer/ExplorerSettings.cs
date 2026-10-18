@@ -4,6 +4,9 @@ namespace AnimeStudio.AssetExplorer;
 
 internal sealed class ExplorerSettings
 {
+    private static readonly object saveGate = new();
+    private static Task pendingSave = Task.CompletedTask;
+    private static ExplorerSettings latest;
     public string WorkDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AnimeStudio", "AssetExplorer");
     public string Catalog = "", SourceRoot = "", CabMap = "", DictionaryDirectory = "", ExportDirectory = "";
     public GameType Game = GameType.ZZZ;
@@ -13,6 +16,7 @@ internal sealed class ExplorerSettings
     private static string SettingsPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AnimeStudio", "AssetExplorer", "settings.json");
     public static ExplorerSettings Load()
     {
+        lock (saveGate) { if (latest != null) return latest.Snapshot(); }
         if (File.Exists(SettingsPath))
         {
             try { return JsonConvert.DeserializeObject<ExplorerSettings>(File.ReadAllText(SettingsPath)) ?? new(); }
@@ -36,6 +40,24 @@ internal sealed class ExplorerSettings
         Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath));
         File.WriteAllText(SettingsPath + ".tmp", JsonConvert.SerializeObject(this, Formatting.Indented));
         File.Move(SettingsPath + ".tmp", SettingsPath, true);
+    }
+
+    public ExplorerSettings Snapshot() => (ExplorerSettings)MemberwiseClone();
+
+    public Task QueueSave(Action<ExplorerSettings> write = null)
+    {
+        var snapshot = Snapshot();
+        lock (saveGate)
+        {
+            latest = snapshot;
+            // Serialize writes across Explorer instances; reopening can use the latest in-memory settings.
+            pendingSave = pendingSave.ContinueWith(_ =>
+            {
+                try { if (write == null) snapshot.Save(); else write(snapshot); }
+                catch (Exception ex) { System.Diagnostics.Trace.TraceWarning("Asset Explorer 设置保存失败：" + ex.Message); }
+            }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+            return pendingSave;
+        }
     }
     public static string FindCabMap(string catalog)
     {

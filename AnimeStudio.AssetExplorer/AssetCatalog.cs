@@ -30,7 +30,8 @@ internal sealed class AssetIndexStore : IMeshCatalog
     public static AssetIndexStore Load(string path, string cacheDirectory, Action<string> report, CancellationToken token)
     {
         path = Path.GetFullPath(path);
-        if (Path.GetExtension(path).Equals(".aex", StringComparison.OrdinalIgnoreCase)) return ReadBinary(path, token);
+        if (Path.GetExtension(path).Equals(".aex", StringComparison.OrdinalIgnoreCase))
+        { report?.Invoke("正在读取资源索引…"); return ReadBinary(path, token, report); }
         var info = new FileInfo(path);
         var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(path.ToUpperInvariant())));
         var cache = Path.Combine(cacheDirectory, key + ".aex");
@@ -38,7 +39,7 @@ internal sealed class AssetIndexStore : IMeshCatalog
         try
         {
             if (File.Exists(cache) && File.ReadAllText(cache + ".stamp") == stamp)
-            { report?.Invoke("读取已缓存的索引…"); return ReadBinary(cache, token); }
+            { report?.Invoke("读取已缓存的索引…"); return ReadBinary(cache, token, report); }
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or FormatException) { }
 
@@ -113,7 +114,9 @@ internal sealed class AssetIndexStore : IMeshCatalog
                 break;
             default: throw new InvalidDataException("请选择 .json、.tsv、.map 或 .aex 清单。");
         }
+        report?.Invoke("正在整理资源索引…");
         var result = builder.Build(game, path);
+        report?.Invoke("正在保存索引缓存…");
         result.Save(cache, token);
         File.WriteAllText(cache + ".stamp", stamp);
         return result;
@@ -145,13 +148,14 @@ internal sealed class AssetIndexStore : IMeshCatalog
         }
     }
 
-    private void Initialize()
+    private void Initialize(CancellationToken token = default)
     {
         var blocks = new Dictionary<string, string>(StringComparer.Ordinal);
         Blk = new string[Count];
         var groups = new Dictionary<string, List<int>>(StringComparer.Ordinal);
         for (var i = 0; i < Count; i++)
         {
+            if ((i & 0xFFFF) == 0) token.ThrowIfCancellationRequested();
             if (!blocks.TryGetValue(Source[i], out var block)) blocks[Source[i]] = block = Path.GetFileName(Source[i]);
             Blk[i] = block;
             if (!groups.TryGetValue(Type[i], out var rows)) groups[Type[i]] = rows = [];
@@ -191,7 +195,7 @@ internal sealed class AssetIndexStore : IMeshCatalog
         finally { if (File.Exists(temp)) File.Delete(temp); }
     }
 
-    private static AssetIndexStore ReadBinary(string path, CancellationToken token)
+    private static AssetIndexStore ReadBinary(string path, CancellationToken token, Action<string> report = null)
     {
         using var stream = File.OpenRead(path);
         using var zip = new GZipStream(stream, CompressionMode.Decompress);
@@ -199,6 +203,8 @@ internal sealed class AssetIndexStore : IMeshCatalog
         if (reader.ReadString() != Signature) throw new InvalidDataException("索引版本不匹配，请重新导入清单。");
         var sourcePath = reader.ReadString(); var game = (GameType)reader.ReadInt32(); var count = reader.ReadInt32();
         if (count < 0 || count > 100_000_000) throw new InvalidDataException("无效的索引行数。");
+        report?.Invoke($"正在读取资源索引：0 / {count:N0} 条…");
+        var progressTimer = Stopwatch.StartNew();
         var store = new AssetIndexStore { Name = new string[count], Type = new string[count], Container = new string[count],
             Source = new string[count], Cab = new string[count], PathID = new long[count], Offset = new long[count],
             Guessed = new string[count], Game = game, SourcePath = sourcePath };
@@ -216,8 +222,14 @@ internal sealed class AssetIndexStore : IMeshCatalog
             store.Name[i] = reader.ReadString(); store.Type[i] = Read(); store.Container[i] = Read();
             store.Source[i] = Read(); store.Cab[i] = Read(); store.PathID[i] = reader.ReadInt64(); store.Offset[i] = reader.ReadInt64();
             var guess = reader.ReadString(); store.Guessed[i] = guess.Length == 0 ? null : guess;
+            if ((i & 0xFFFF) == 0 && progressTimer.ElapsedMilliseconds >= 250)
+            {
+                report?.Invoke($"正在读取资源索引：{i + 1:N0} / {count:N0} 条 · {(i + 1L) * 100 / Math.Max(1, count)}%");
+                progressTimer.Restart();
+            }
         }
-        store.Initialize(); return store;
+        report?.Invoke($"已读取 {count:N0} 条，正在整理搜索索引…");
+        store.Initialize(token); return store;
     }
 
     public int ApplyPathDict(IReadOnlyDictionary<ulong, string> paths)

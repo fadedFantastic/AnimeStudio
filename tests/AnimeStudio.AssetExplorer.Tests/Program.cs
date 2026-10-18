@@ -35,7 +35,7 @@ if (args.FirstOrDefault() == "--layout")
         {
             System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.SystemAware);
             System.Windows.Forms.Application.EnableVisualStyles();
-            using var form = new ExplorerForm(new PreviewBridge(), false) { Opacity = 0, ShowInTaskbar = false };
+            using var form = new ExplorerForm(new PreviewBridge(), false, new ExplorerSettings(), _ => { }) { Opacity = 0, ShowInTaskbar = false };
             form.Show(); form.PerformLayout(); System.Windows.Forms.Application.DoEvents();
             using var image = new System.Drawing.Bitmap(form.Width, form.Height);
             form.DrawToBitmap(image, new System.Drawing.Rectangle(0, 0, form.Width, form.Height));
@@ -50,45 +50,13 @@ if (args.FirstOrDefault() == "--layout")
 
 if (args.FirstOrDefault() == "--directory-layout")
 {
-    Exception failure = null;
-    var thread = new Thread(() =>
-    {
-        try
-        {
-            System.Windows.Forms.Application.SetHighDpiMode(System.Windows.Forms.HighDpiMode.SystemAware);
-            System.Windows.Forms.Application.EnableVisualStyles();
-            var builder = new AssetIndexStore.Builder();
-            builder.Add(new CatalogAsset { Name = "Hero", Type = ClassIDType.Animator, Source = "demo.blk", Container = "Assets/Characters/Hero/Model/Hero.fbx", PathID = 1 });
-            builder.Add(new CatalogAsset { Name = "Idle", Type = ClassIDType.AnimationClip, Source = "demo.blk", Container = "Assets/Characters/Hero/Animation/Idle.fbx", PathID = 2 });
-            builder.Add(new CatalogAsset { Name = "Walk", Type = ClassIDType.AnimationClip, Source = "demo.blk", Container = "Assets/Characters/Hero/Animation/Walk.fbx", PathID = 3 });
-            builder.Add(new CatalogAsset { Name = "Diffuse", Type = ClassIDType.Texture2D, Source = "demo.blk", Container = "Assets/Characters/Hero/Textures/Diffuse.png", PathID = 4 });
-            builder.Add(new CatalogAsset { Name = "Info", Type = ClassIDType.TextAsset, Source = "demo.blk", Container = "Assets/Characters/Hero/info.json", PathID = 5 });
-            var catalog = builder.Build(GameType.ZZZ, "fixture");
-            using var form = new DirectoryExportForm(catalog, new PreviewBridge(), new(GameType.ZZZ, [], "", ""), "Assets/Characters/Hero", output)
-                { Opacity = 0, ShowInTaskbar = false };
-            form.Show();
-            var button = (System.Windows.Forms.Button)form.Controls.Find("collectDirectory", true).Single();
-            button.PerformClick();
-            var timer = Stopwatch.StartNew();
-            while (!button.Enabled && timer.ElapsedMilliseconds < 5000) { System.Windows.Forms.Application.DoEvents(); Thread.Sleep(5); }
-            Check(((System.Windows.Forms.ListView)form.Controls.Find("resourcePreview", true).Single()).VirtualListSize == 5, "directory dialog collects and previews primary resources");
-            var tree = (System.Windows.Forms.TreeView)form.Controls.Find("directoryTree", true).Single();
-            var typeList = (System.Windows.Forms.CheckedListBox)form.Controls.Find("fileTypes", true).Single();
-            var preview = (System.Windows.Forms.ListView)form.Controls.Find("resourcePreview", true).Single();
-            tree.Nodes[0].Nodes.Cast<System.Windows.Forms.TreeNode>().Single(n => n.Text == "Model").Checked = false;
-            Check(preview.VirtualListSize == 4, "unchecking one directory preserves other selections");
-            for (int i = 0; i < typeList.Items.Count; i++) typeList.SetItemChecked(i, typeList.Items[i].ToString().StartsWith(".fbx"));
-            System.Windows.Forms.Application.DoEvents();
-            Check(preview.VirtualListSize == 2, "directory and file-type multiselect intersect");
-            form.PerformLayout();
-            using var bitmap = new System.Drawing.Bitmap(form.Width, form.Height);
-            form.DrawToBitmap(bitmap, new System.Drawing.Rectangle(0, 0, form.Width, form.Height));
-            bitmap.Save(Path.Combine(output, "directory.png"));
-        }
-        catch (Exception ex) { failure = ex; }
-    });
-    thread.SetApartmentState(ApartmentState.STA); thread.Start(); thread.Join();
-    if (failure != null) throw failure;
+    ExplorerUiTests.Run(output, Check);
+    return;
+}
+
+if (args.FirstOrDefault() == "--close-performance")
+{
+    ExplorerUiTests.RunClosePerformance(Check);
     return;
 }
 
