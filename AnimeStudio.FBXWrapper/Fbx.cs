@@ -68,7 +68,8 @@ namespace AnimeStudio
             public bool preserveRootNodeAsNull;
             public bool optimizeAnimationSize;
             public int boneSize;
-            public float scaleFactor;
+            // Dimensionless multiplier applied to Unity's meter-based coordinates.
+            public float scaleFactor = 1;
             public int fbxVersion;
             public int fbxFormat;
         }

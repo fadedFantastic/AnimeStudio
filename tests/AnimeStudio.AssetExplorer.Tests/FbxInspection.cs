@@ -11,6 +11,7 @@ internal sealed class FbxInspection
     public List<long> CurveIds { get; } = [];
     public Dictionary<string, (long Start, long Stop)> TakeTimes { get; } = [];
     public Dictionary<string, Dictionary<string, long>> StackTimes { get; } = [];
+    public Dictionary<string, double> Units { get; } = [];
     public List<(long Child, long Parent)> Connections { get; } = [];
     public Node[] Roots => Models.Where(m => Connections.Any(c => c.Child == m.Id && c.Parent == 0)).ToArray();
 
@@ -21,7 +22,7 @@ internal sealed class FbxInspection
         var wide = reader.ReadInt32() >= 7500;
         var headerSize = wide ? 25 : 13;
         var result = new FbxInspection();
-        bool ReadNode(string take = null, string stack = null)
+        bool ReadNode(string take = null, string stack = null, bool globalSettings = false)
         {
             var end = wide ? reader.ReadInt64() : reader.ReadUInt32();
             var count = wide ? reader.ReadInt64() : reader.ReadUInt32();
@@ -29,9 +30,10 @@ internal sealed class FbxInspection
             var nameLength = reader.ReadByte();
             if (end == 0) return false;
             var name = Encoding.UTF8.GetString(reader.ReadBytes(nameLength));
+            globalSettings |= name == "GlobalSettings";
             var dataEnd = reader.BaseStream.Position + length;
             var properties = new List<object>();
-            if (name is "Model" or "AnimationStack" or "AnimationCurve" or "C" or "Take" or "LocalTime" or "ReferenceTime" || name == "P" && stack != null)
+            if (name is "Model" or "AnimationStack" or "AnimationCurve" or "C" or "Take" or "LocalTime" or "ReferenceTime" || name == "P" && (stack != null || globalSettings))
                 for (var i = 0; i < count; i++)
                 {
                     var type = reader.ReadChar();
@@ -54,9 +56,12 @@ internal sealed class FbxInspection
             if (name == "LocalTime" && take != null) result.TakeTimes[take] = ((long)properties[0], (long)properties[1]);
             if (name == "P" && stack != null && properties.Count == 5 && properties[4] is long value)
                 result.StackTimes[stack][(string)properties[0]] = value;
+            if (name == "P" && globalSettings && properties.Count == 5 && properties[4] is double unit &&
+                (string)properties[0] is "UnitScaleFactor" or "OriginalUnitScaleFactor")
+                result.Units[(string)properties[0]] = unit;
             if (name == "AnimationCurve") { result.CurveCount++; result.CurveIds.Add((long)properties[0]); }
             if (name == "C" && (string)properties[0] == "OO") result.Connections.Add(((long)properties[1], (long)properties[2]));
-            while (reader.BaseStream.Position < end - headerSize) if (!ReadNode(take, stack)) break;
+            while (reader.BaseStream.Position < end - headerSize) if (!ReadNode(take, stack, globalSettings)) break;
             reader.BaseStream.Position = end;
             return true;
         }

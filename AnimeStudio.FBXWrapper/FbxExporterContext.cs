@@ -76,7 +76,10 @@ namespace AnimeStudio.FbxInterop
         {
             EnsureNotDisposed();
 
-            var b = AsFbxInitializeContext(_pContext, fileName, _exportOptions.scaleFactor, _exportOptions.fbxVersion, _exportOptions.fbxFormat == 1, is60Fps, out var errorMessage);
+            // Unity coordinates are meters. FbxSystemUnit takes centimeters per unit;
+            // passing the user multiplier directly labels a meter as a centimeter.
+            var centimetersPerUnit = 100f * _exportOptions.scaleFactor;
+            var b = AsFbxInitializeContext(_pContext, fileName, centimetersPerUnit, _exportOptions.fbxVersion, _exportOptions.fbxFormat == 1, is60Fps, out var errorMessage);
 
             if (!b)
             {
