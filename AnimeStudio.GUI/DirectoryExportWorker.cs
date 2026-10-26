@@ -54,13 +54,20 @@ internal static partial class DirectoryExportWorker
         return true;
     }
 
-    private sealed class RemoteMeshes(Action<Reply> send) : IMeshCatalog
+    private sealed class RemoteMeshes(Action<Reply> send) : IMeshCatalog, IControllerContextCatalog
     {
         public IReadOnlyDictionary<string, CatalogAsset[]> FindMeshes(IEnumerable<string> paths, CancellationToken token)
         {
             send(new("meshes", Paths: paths.ToArray()));
             var line = Console.ReadLine() ?? throw new EndOfStreamException("导出控制进程已退出。");
             return new Dictionary<string, CatalogAsset[]>(JsonConvert.DeserializeObject<Dictionary<string, CatalogAsset[]>>(line), StringComparer.OrdinalIgnoreCase);
+        }
+
+        public CatalogAsset[] FindControllerContext(string resourcePath, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested(); send(new("controller-context", Paths: [resourcePath]));
+            var line = Console.ReadLine() ?? throw new EndOfStreamException("导出控制进程已退出。");
+            return JsonConvert.DeserializeObject<CatalogAsset[]>(line);
         }
     }
 
@@ -130,6 +137,12 @@ internal static partial class DirectoryExportWorker
                     var reply = JsonConvert.DeserializeObject<Reply>(line[(index + Prefix.Length)..]);
                     if (reply.Kind == "error") throw new IOException(reply.Error);
                     if (reply.Kind == "result") return reply.Result ?? throw new IOException("工作进程返回空结果。");
+                    if (reply.Kind == "controller-context")
+                    {
+                        var rows = await Task.Run(() => (context.MeshCatalog as IControllerContextCatalog)?.FindControllerContext(reply.Paths[0], token) ?? [], token).ConfigureAwait(false);
+                        await process.StandardInput.WriteLineAsync(JsonConvert.SerializeObject(rows).AsMemory(), token);
+                        await process.StandardInput.FlushAsync(token);
+                    }
                     if (reply.Kind == "meshes")
                     {
                         // Query the parent's existing index; don't duplicate the multi-million-row catalog per worker.

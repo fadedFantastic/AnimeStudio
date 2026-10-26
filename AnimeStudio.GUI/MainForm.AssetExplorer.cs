@@ -117,6 +117,9 @@ partial class MainForm
         {
             if (content.Main == null) throw new InvalidDataException("没有找到主资源对象。");
             token.ThrowIfCancellationRequested();
+            if (group.IsCompiledController && content.Main is RuntimeAnimatorController)
+                return EditableControllerExporter.Export(content.Main,
+                    Path.Combine(output, ResourcePaths.OutputSegment(Path.GetFileName(group.ResourcePath))), group.ResourcePath, token);
             // There is no general writer for Unity prefab/asset/material files. Do not disguise
             // JSON or raw object bytes as a successfully reconstructed source resource.
             if (content.Members.Length != 1 || content.Main is not (Texture2D or AudioClip or TextAsset or AnimeStudio.Font or Mesh or VideoClip or MovieTexture or Sprite or Shader or AnimationClip))

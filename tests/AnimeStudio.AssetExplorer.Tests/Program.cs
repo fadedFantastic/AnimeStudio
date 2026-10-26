@@ -555,7 +555,35 @@ if (args.FirstOrDefault() == "--worker-crash")
     return;
 }
 
-if (args.FirstOrDefault() is "--directory" or "--directory-origin" or "--directory-attack")
+if (args.FirstOrDefault() == "--controller-verify")
+{
+    ControllerReplayVerification.Run(args[2], output, Check);
+    return;
+}
+
+if (args.FirstOrDefault() == "--controller-inspect")
+{
+    Logger.Silent = true;
+    var manager = new AssetsManager { Game = GameManager.GetGameByType(GameType.ZZZ), SkipProcess = true, ResolveDependencies = false,
+        FilterData = new() { Items = [new() { Source = Path.GetFullPath(args[2]), Offset = long.Parse(args[3]) }] } };
+    try
+    {
+        manager.LoadFiles([args[2]], mergeSplitAssets: false);
+        foreach (var file in manager.assetsFileList)
+            foreach (var info in file.m_Objects.Where(i => i.classID == (int)ClassIDType.AnimatorController))
+            {
+                var controller = new AnimatorController(new ObjectReader(file.reader, file, info, manager.Game));
+                File.WriteAllText(Path.Combine(output, controller.Name + ".json"), JsonConvert.SerializeObject(new
+                { controller.Name, file.unityVersion, file.fileName, PathID = info.m_PathID.ToString(), controller.m_Controller,
+                    controller.m_TOS, Clips = controller.m_AnimationClips.Select((p, i) => new { Index = i, p.m_FileID, PathID = p.m_PathID.ToString() }) }, Formatting.Indented));
+                Check(controller.m_Controller != null, "compiled controller graph retained: " + controller.Name);
+            }
+    }
+    finally { manager.Clear(); }
+    return;
+}
+
+if (args.FirstOrDefault() is "--directory" or "--directory-origin" or "--directory-attack" or "--directory-collect" or "--directory-replay")
 {
     var store = AssetIndexStore.Load(args[2], output, Console.WriteLine, default);
     if (args.Length > 4)
@@ -567,8 +595,28 @@ if (args.FirstOrDefault() is "--directory" or "--directory-origin" or "--directo
     var plan = store.CollectDirectory(args[3], true, default);
     if (args[0] == "--directory-origin") plan = plan with { Groups = plan.Groups.Where(g => g.ResourcePath.EndsWith("Remielle_Origin_Model.fbx")).ToArray() };
     if (args[0] == "--directory-attack") plan = plan with { Groups = plan.Groups.Where(g => g.ResourcePath.EndsWith("/Avatar_Female_Size02_Remielle_Origin_Ani_Attack_Normal_01.fbx")).ToArray() };
+    if (args[0] == "--directory-replay")
+    {
+        var original = Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(args[7]));
+        var paths = original["Items"].Select(item => (string)item["ResourcePath"]).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        plan = plan with { Groups = plan.Groups.Where(g => paths.Contains(g.ResourcePath)).ToArray() };
+        Check(plan.Groups.Length == paths.Count, "replay includes every primary resource from the original export log");
+        Check(plan.Groups.All(g => g.Members.Where(a => !string.IsNullOrEmpty(a.Cab))
+                .GroupBy(a => a.Cab, StringComparer.OrdinalIgnoreCase)
+                .All(cab => cab.Select(a => (a.Source.ToUpperInvariant(), a.Offset)).Distinct().Count() == 1)),
+            "real replay groups select exactly one physical copy per CAB");
+    }
     Console.WriteLine($"DIRECTORY {plan.Groups.Length} primary files, {plan.MatchedRows} rows, {plan.DuplicateRows} duplicate rows");
     File.WriteAllText(Path.Combine(output, "collection.json"), JsonConvert.SerializeObject(plan, Formatting.Indented));
+    if (args[0] == "--directory-collect")
+    {
+        // Preserve every physical copy so a small real-data fixture can reproduce grouping bugs.
+        var subset = new AssetIndexStore.Builder();
+        for (var i = 0; i < store.Count; i++)
+            if (ResourcePaths.IsWithin(store.Container[i].Replace('\\', '/'), plan.Directory, true)) subset.Add(store.Entry(i));
+        subset.Build(store.Game, store.SourcePath).Save(Path.Combine(output, "subset.aex"), default);
+        return;
+    }
     if (args.Length > 4)
     {
         Logger.Silent = true;
@@ -580,11 +628,11 @@ if (args.FirstOrDefault() is "--directory" or "--directory-origin" or "--directo
         var context = new CatalogRequest(store.Game, [], args[4], "") { MeshCatalog = store, ExportLogDirectory = Path.Combine(output, "logs"), ExportWorkers = args.Length > 6 ? int.Parse(args[6]) : 2 };
         var exportTimer = Stopwatch.StartNew();
         using var exportCancellation = new CancellationTokenSource();
-        if (args.Length > 7) exportCancellation.CancelAfter(int.Parse(args[7]));
+        if (args[0] != "--directory-replay" && args.Length > 7) exportCancellation.CancelAfter(int.Parse(args[7]));
         var result = await bridge.ExportDirectoryAsync(plan, context, Path.Combine(output, "files"), Console.WriteLine, exportCancellation.Token);
         Console.WriteLine($"EXPORT BENCH workers={context.ExportWorkers} seconds={exportTimer.Elapsed.TotalSeconds:F2}");
         File.WriteAllText(Path.Combine(output, "directory-result.json"), JsonConvert.SerializeObject(result, Formatting.Indented));
-        if (args.Length > 7)
+        if (args[0] != "--directory-replay" && args.Length > 7)
         {
             Check(result.Cancelled && result.Pending > 0 && result.Failed == 0, "real worker cancellation returns unfinished resources without reporting failures");
             return;
@@ -784,6 +832,8 @@ FbxOptimizationTests.Run(output, Check);
 FbxTimeSpanTests.Run(output, Check);
 FbxScaleTests.Run(output, Check);
 AvatarTests.Run(Check);
+ExportLoadingTests.Run(Check);
+ControllerExportTests.Run(output, Check);
 var directoryBuilder = new AssetIndexStore.Builder();
 foreach (var asset in new[]
 {
@@ -948,6 +998,8 @@ Check(load.Files.Length == 2 && load.Offsets.Length == 3 && load.Missing.Length 
 Check(load.Selected[0].Source == Path.Combine(sourceRoot, "a.blk"), "source root relocation");
 File.Delete(Path.Combine(sourceRoot, "b.blk"));
 Check(CabCatalog.Plan(new(GameType.ZZZ, new[] { fixtures[0] }, mapPath, sourceRoot), default).Missing.Length == 1, "missing dependency is reported");
+Check(CabCatalog.Plan(new(GameType.ZZZ, new[] { fixtures[0] }, mapPath, sourceRoot), default, includeDependencies: false).Missing.Length == 0,
+    "raw-only load does not require missing external CABs");
 var recovery = new PathRecovery.Request { Name = new[] { "Hero", "seed" }, Type = new[] { "Material", "Material" },
     Container = new[] { PathRecovery.HashOf("assets/hero.mat").ToString(), "assets/seed.mat" }, Blk = new[] { "a.blk", "a.blk" }, Count = 2,
     KnownPaths = new Dictionary<ulong, string> { [1] = "assets/seed.mat" } };

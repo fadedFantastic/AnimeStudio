@@ -6,6 +6,8 @@ namespace AnimeStudio.AssetExplorer;
 public sealed record PrimaryAssetGroup(string ResourcePath, CatalogAsset[] Members)
 {
     public bool IsFbx => ResourcePath.EndsWith(".fbx", StringComparison.OrdinalIgnoreCase);
+    public bool IsCompiledController => ResourcePath.EndsWith(".controller", StringComparison.OrdinalIgnoreCase) ||
+        ResourcePath.EndsWith(".overrideController", StringComparison.OrdinalIgnoreCase);
     public string Extension => Path.GetExtension(ResourcePath).ToLowerInvariant();
 }
 

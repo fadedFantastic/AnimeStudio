@@ -9,7 +9,7 @@ using Newtonsoft.Json;
 
 namespace AnimeStudio.AssetExplorer;
 
-internal sealed class AssetIndexStore : IMeshCatalog
+internal sealed class AssetIndexStore : IMeshCatalog, IControllerContextCatalog
 {
     public string[] Name, Type, Blk, Container, Source, Cab, Guessed;
     public long[] PathID, Offset;
@@ -262,10 +262,18 @@ internal sealed class AssetIndexStore : IMeshCatalog
         foreach (var group in groups.OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase))
         {
             token.ThrowIfCancellationRequested();
-            // Prefer one complete physical copy, but preserve unique subassets spread across files.
+            // CAB copies can have different PathIDs. Keep one complete location per CAB
+            // before deduplicating legacy rows whose CAB identity is unavailable.
             var copies = group.Value.GroupBy(a => (a.Source.ToUpperInvariant(), a.Offset))
                 .OrderByDescending(g => g.Count()).ThenBy(g => g.Key.Item1, StringComparer.Ordinal).ThenBy(g => g.Key.Offset);
-            var members = copies.SelectMany(g => g).DistinctBy(a => (a.Type, a.PathID, a.Name)).ToArray();
+            var members = copies.SelectMany(g => g).GroupBy(a => a.Cab, StringComparer.OrdinalIgnoreCase)
+                .SelectMany(cab => string.IsNullOrEmpty(cab.Key)
+                    ? cab.DistinctBy(a => (a.Type, a.PathID, a.Name))
+                    : cab.GroupBy(a => (a.Source.ToUpperInvariant(), a.Offset))
+                        .OrderByDescending(g => g.Select(a => (a.Type, a.PathID)).Distinct().Count())
+                        .ThenBy(g => g.Key.Item1, StringComparer.Ordinal).ThenBy(g => g.Key.Offset)
+                        .First().DistinctBy(a => (a.Type, a.PathID)))
+                .ToArray();
             unique += members.Length;
             result.Add(new PrimaryAssetGroup(group.Key, members));
         }
@@ -286,6 +294,24 @@ internal sealed class AssetIndexStore : IMeshCatalog
                 else if (ulong.TryParse(container, out var hash) && hashes.TryGetValue(hash, out var path)) matches[path].Add(Entry(i));
             }
         return matches.ToDictionary(p => p.Key, p => p.Value.ToArray(), StringComparer.OrdinalIgnoreCase);
+    }
+
+    public CatalogAsset[] FindControllerContext(string resourcePath, CancellationToken token)
+    {
+        var directory = ResourcePaths.Parent(resourcePath);
+        var result = new List<CatalogAsset>();
+        if (typeRows.TryGetValue(nameof(ClassIDType.Animator), out var rows))
+            foreach (var i in rows)
+            {
+                token.ThrowIfCancellationRequested();
+                var path = Container[i].Replace('\\', '/');
+                if (path.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase) && ResourcePaths.Parent(path).Equals(directory, StringComparison.OrdinalIgnoreCase))
+                    result.Add(Entry(i));
+            }
+        // Context only supplies verified transform paths. The Animator's controller
+        // pointer determines whether its hierarchy belongs to an exported clip.
+        return result.GroupBy(a => string.IsNullOrEmpty(a.Cab) ? a.Source + "|" + a.Offset : a.Cab, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First()).ToArray();
     }
 
     public int[] Search(Query query, CancellationToken token)

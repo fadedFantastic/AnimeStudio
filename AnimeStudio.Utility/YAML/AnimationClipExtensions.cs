@@ -142,11 +142,11 @@ namespace AnimeStudio
                 return false;
             }
         }
-        public static string Convert(this AnimationClip clip)
+        public static string Convert(this AnimationClip clip, Dictionary<uint, string> recoveredPaths = null)
         {
             if (!clip.m_Legacy || clip.m_MuscleClip != null)
             {
-                var converter = AnimationClipConverter.Process(clip);
+                var converter = AnimationClipConverter.Process(clip, recoveredPaths);
                 clip.m_RotationCurves = converter.Rotations.Union(clip.m_RotationCurves).ToList();
                 clip.m_EulerCurves = converter.Eulers.Union(clip.m_EulerCurves).ToList();
                 clip.m_PositionCurves = converter.Translations.Union(clip.m_PositionCurves).ToList();

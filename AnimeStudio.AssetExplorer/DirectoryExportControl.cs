@@ -60,7 +60,8 @@ internal sealed class DirectoryExportControl : UserControl
         {
             if (e.ItemIndex >= visible.Length) { e.Item = new ListViewItem(""); return; }
             var group = visible[e.ItemIndex];
-            e.Item = new ListViewItem([group.ResourcePath[(visibleRoot.Length + 1)..], group.IsFbx ? "FBX（含子动画）" : "按可用格式导出", group.Members.Length.ToString()]);
+            e.Item = new ListViewItem([group.ResourcePath[(visibleRoot.Length + 1)..], group.IsFbx ? "FBX（含子动画）" :
+                group.IsCompiledController ? "Unity 可编辑状态机（保留编译数据）" : "按可用格式导出", group.Members.Length.ToString()]);
         };
         Controls.Add(content); Controls.Add(actions); Controls.Add(pathBar);
         collect.Click += async (_, _) => await CollectAsync();

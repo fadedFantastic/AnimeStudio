@@ -17,6 +17,11 @@ public interface IMeshCatalog
     IReadOnlyDictionary<string, CatalogAsset[]> FindMeshes(IEnumerable<string> paths, CancellationToken token);
 }
 
+public interface IControllerContextCatalog
+{
+    CatalogAsset[] FindControllerContext(string resourcePath, CancellationToken token);
+}
+
 public sealed record CatalogRequest(GameType Game, CatalogAsset[] Assets, string CabMap, string SourceRoot)
 {
     public string ExportLogDirectory { get; init; }

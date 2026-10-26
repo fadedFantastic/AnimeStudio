@@ -14,12 +14,25 @@ internal static partial class DirectoryExportWorker
         if (group.IsFbx && string.IsNullOrWhiteSpace(request.CabMap)) throw new InvalidOperationException("FBX 目录导出需要 CABMap。");
         var load = CabCatalog.Plan(request, cancellation, cachedMap);
         if (load.Missing.Length > 0) throw new FileNotFoundException(string.Join(Environment.NewLine, load.Missing.Take(8)));
+        if (group.IsCompiledController && request.MeshCatalog is IControllerContextCatalog catalog)
+        {
+            var rows = catalog.FindControllerContext(group.ResourcePath, cancellation);
+            if (rows.Length > 0)
+            {
+                var contextLoad = ControllerContextLoader.Plan(request, rows, cachedMap, cancellation);
+                if (contextLoad.Missing.Length == 0)
+                    load = load with { Files = load.Files.Concat(contextLoad.Files).Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+                        Offsets = load.Offsets.Concat(contextLoad.Offsets).DistinctBy(o => (o.Source.ToUpperInvariant(), o.Offset)).ToArray() };
+            }
+        }
         var manager = new AssetsManager { Game = GameManager.GetGameByType(request.Game), ResolveDependencies = false,
             FilterData = new() { Items = load.Offsets.ToList() } };
         try
         {
             using (cancellation.Register(() => manager.tokenSource.Cancel())) manager.LoadFiles(load.Files, mergeSplitAssets: false);
             cancellation.ThrowIfCancellationRequested(); manager.FilterData.Items.Clear();
+            if (group.IsCompiledController)
+                return EditableControllerExporter.Export(manager, group, load.Selected, output, cancellation);
             var content = PrimaryAssetResolver.Resolve(manager, group, load.Selected);
             if (group.IsFbx)
             {

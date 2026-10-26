@@ -17,6 +17,7 @@ namespace AnimeStudio
 
         private readonly Game game;
         private readonly AnimationClip animationClip;
+        private readonly Dictionary<uint, string> recoveredPaths;
         private readonly CustomCurveResolver m_customCurveResolver;
 
         private readonly Dictionary<Vector3Curve, List<Keyframe<Vector3>>> m_translations = new Dictionary<Vector3Curve, List<Keyframe<Vector3>>>();
@@ -33,16 +34,17 @@ namespace AnimeStudio
         public List<FloatCurve> Floats { get; private set; }
         public List<PPtrCurve> PPtrs { get; private set; }
 
-        public AnimationClipConverter(AnimationClip clip)
+        public AnimationClipConverter(AnimationClip clip, Dictionary<uint, string> recoveredPaths = null)
         {
             game = clip.assetsFile.game;
             animationClip = clip;
+            this.recoveredPaths = recoveredPaths;
             m_customCurveResolver = new CustomCurveResolver(animationClip);
         }
 
-        public static AnimationClipConverter Process(AnimationClip clip)
+        public static AnimationClipConverter Process(AnimationClip clip, Dictionary<uint, string> recoveredPaths = null)
         {
-            var converter = new AnimationClipConverter(clip);
+            var converter = new AnimationClipConverter(clip, recoveredPaths);
             converter.ProcessInner();
             return converter;
         }
@@ -50,7 +52,7 @@ namespace AnimeStudio
         {
             var m_Clip = animationClip.m_MuscleClip.m_Clip;
             var bindings = animationClip.m_ClipBindingConstant;
-            var tos = animationClip.FindTOS();
+            var tos = recoveredPaths ?? animationClip.FindTOS();
 
             var streamedFrames = m_Clip.m_StreamedClip.ReadData();
             var lastDenseFrame = m_Clip.m_DenseClip.m_FrameCount / m_Clip.m_DenseClip.m_SampleRate;

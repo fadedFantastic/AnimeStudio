@@ -526,6 +526,7 @@ namespace AnimeStudio
         public uint m_SpeedParamID;
         public uint m_MirrorParamID;
         public uint m_CycleOffsetParamID;
+        public uint m_TimeParamID;
         public float m_Speed;
         public float m_CycleOffset;
         public bool m_IKOnFeet;
@@ -585,7 +586,7 @@ namespace AnimeStudio
 
             if (version[0] > 2017 || (version[0] == 2017 && version[1] >= 2)) //2017.2 and up
             {
-                var m_TimeParamID = reader.ReadUInt32();
+                m_TimeParamID = reader.ReadUInt32();
             }
 
             m_Speed = reader.ReadSingle();
@@ -846,13 +847,15 @@ namespace AnimeStudio
 
     public sealed class AnimatorController : RuntimeAnimatorController
     {
+        public uint m_ControllerSize;
+        public ControllerConstant m_Controller;
         public Dictionary<uint, string> m_TOS;
         public List<PPtr<AnimationClip>> m_AnimationClips;
 
         public AnimatorController(ObjectReader reader) : base(reader)
         {
-            var m_ControllerSize = reader.ReadUInt32();
-            var m_Controller = new ControllerConstant(reader);
+            m_ControllerSize = reader.ReadUInt32();
+            m_Controller = new ControllerConstant(reader);
 
             int tosSize = reader.ReadInt32();
             m_TOS = new Dictionary<uint, string>();

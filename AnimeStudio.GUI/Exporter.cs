@@ -443,6 +443,14 @@ namespace AnimeStudio.GUI
             return true;
         }
 
+        public static bool ExportAnimatorController(AssetItem item, string exportPath)
+        {
+            var extension = item.Asset is AnimatorOverrideController ? ".overrideController" : ".controller";
+            if (!TryExportFile(exportPath, item, extension, out var destination)) return false;
+            AnimeStudio.AssetExplorer.EditableControllerExporter.Export(item.Asset, destination, item.Container, default);
+            return true;
+        }
+
         private static bool TryExportFile(string dir, AssetItem item, string extension, out string fullPath)
         {
             var fileName = FixFileName(item.Text);
@@ -673,6 +681,9 @@ namespace AnimeStudio.GUI
                     return ExportAnimator(item, exportPath);
                 case ClassIDType.AnimationClip:
                     return ExportAnimationClip(item, exportPath);
+                case ClassIDType.AnimatorController:
+                case ClassIDType.AnimatorOverrideController:
+                    return ExportAnimatorController(item, exportPath);
                 case ClassIDType.MiHoYoBinData:
                     return ExportMiHoYoBinData(item, exportPath);
                 case ClassIDType.Material:

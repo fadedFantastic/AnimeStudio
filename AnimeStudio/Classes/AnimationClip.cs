@@ -1398,7 +1398,11 @@ namespace AnimeStudio
         {
             var version = reader.version;
             m_ID = reader.ReadUInt32();
-            if (version[0] < 5 || (version[0] == 5 && version[1] < 5))//5.5 down
+            // Older ZZZ controllers retain TypeID after Unity 5.5 (16-byte entries).
+            // Newer controllers use 12-byte entries under the same Unity version.
+            if (version[0] < 5 || (version[0] == 5 && version[1] < 5) ||
+                reader.type == ClassIDType.AnimatorController && (reader.Game.Type.IsZZZ() || reader.Game.Type.IsZZZCB2()) &&
+                reader.serializedType.Match("9860551FBCD452140FD34D9A51C380DE"))
             {
                 m_TypeID = reader.ReadUInt32();
             }

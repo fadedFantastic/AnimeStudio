@@ -19,6 +19,11 @@ public sealed class CabCatalog
             .ToDictionary(x => x.Key, x => x.ToArray(), StringComparer.OrdinalIgnoreCase);
     }
 
+    public CabEntry[] FindCab(string name)
+    {
+        BuildLookup(); return names.GetValueOrDefault(name) ?? [];
+    }
+
     public static CabCatalog Read(string path, CancellationToken token)
     {
         using var reader = new BinaryReader(File.OpenRead(path));
@@ -54,7 +59,7 @@ public sealed class CabCatalog
         }
     }
 
-    public static LoadPlan Plan(CatalogRequest request, CancellationToken token, CabCatalog cachedMap = null)
+    public static LoadPlan Plan(CatalogRequest request, CancellationToken token, CabCatalog cachedMap = null, bool includeDependencies = true)
     {
         if (request.Assets.Length == 0) throw new InvalidOperationException("请先选择资源。");
         CabCatalog map = null;
@@ -76,13 +81,14 @@ public sealed class CabCatalog
         }
         foreach (var row in selected) Add(row.Source, row.Offset);
         var missing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (map != null)
+        if (map != null && includeDependencies)
         {
             map.BuildLookup();
             var names = map.names;
             var locations = map.locations;
             var queue = new Queue<CabEntry>();
             var preferred = new Dictionary<string, CabEntry>(StringComparer.OrdinalIgnoreCase);
+            var selectedHeaders = new Dictionary<(string Source, long Offset, string Cab, long PathID), CabEntry[]>();
             void Prefer(CabEntry entry)
             {
                 if (preferred.TryGetValue(entry.Name, out var previous) &&
@@ -103,7 +109,10 @@ public sealed class CabCatalog
                     // Legacy maps keep only the first copy of a CAB. Read the selected
                     // bundle's headers to resolve its own dependencies, without reading objects.
                     var original = request.Assets[selectedIndex].Source;
-                    matches = ReadSelectedHeaders(row, original, request.Game, token);
+                    var key = (row.Source.ToUpperInvariant(), row.Offset, (row.Cab ?? "").ToUpperInvariant(),
+                        string.IsNullOrEmpty(row.Cab) ? row.PathID : 0);
+                    if (!selectedHeaders.TryGetValue(key, out matches))
+                        selectedHeaders[key] = matches = ReadSelectedHeaders(row, original, request.Game, token);
                 }
                 foreach (var cab in matches) Prefer(cab);
             }
