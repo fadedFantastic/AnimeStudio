@@ -37,6 +37,7 @@ public sealed class ExplorerForm : Form
     private readonly TabPage searchPage = new("快速搜索与模型导出");
     private readonly TabPage directoryPage = new("目录批量导出");
     private readonly DirectoryExportControl directoryExport;
+    private readonly AssetPreviewControl assetPreview;
     private AssetIndexStore store;
     private int[] view = [];
     private CancellationTokenSource operation, query;
@@ -48,6 +49,7 @@ public sealed class ExplorerForm : Form
     internal ExplorerForm(IStudioBridge bridge, bool autoLoadLast, ExplorerSettings settings, Action<ExplorerSettings> persistSettings, Action<Exception> reportError = null)
     {
         this.bridge = bridge;
+        assetPreview = new AssetPreviewControl(bridge);
         this.settings = settings; this.persistSettings = persistSettings;
         this.reportError = reportError;
         directoryExport = new DirectoryExportControl(bridge, DirectoryContext, settings.ResourceDirectory, settings.ExportDirectory, settings.ExportWorkers);
@@ -84,6 +86,7 @@ public sealed class ExplorerForm : Form
         if (!list.IsDisposed) list.VirtualListSize = 0;
         view = []; store = null; basket.Clear();
         directoryExport.PrepareClose();
+        if (!assetPreview.IsDisposed) assetPreview.Reset();
     }
 
     private Button Button(string text, Func<Task> action, bool disableWhileBusy = true)
@@ -143,6 +146,9 @@ public sealed class ExplorerForm : Form
             e.Item = new ListViewItem([store.Name[i], store.Type[i], store.Blk[i], store.Display(i), store.Cab[i], store.Offset[i].ToString(), store.PathID[i].ToString()]);
         };
         list.DoubleClick += (_, _) => AddToBasket();
+        list.SelectedIndexChanged += (_, _) => UpdatePreview();
+        list.MouseUp += (_, _) => UpdatePreview();
+        list.KeyUp += (_, _) => UpdatePreview();
         var menu = new ContextMenuStrip();
         menu.Items.Add("加入导出列表", null, (_, _) => AddToBasket());
         menu.Items.Add("复制资源路径", null, (_, _) => CopySelected(a => a.Container));
@@ -162,22 +168,32 @@ public sealed class ExplorerForm : Form
         { foreach (var i in basketView.SelectedIndices.Cast<int>().OrderByDescending(i => i)) basket.RemoveAt(i); RefreshBasket(); return Task.CompletedTask; }));
         basketBar.Controls.Add(Button("清空", () => { basket.Clear(); RefreshBasket(); return Task.CompletedTask; }));
         basketPanel.Controls.Add(basketView); basketPanel.Controls.Add(basketBar);
-        var searchTop = new Panel { Dock = DockStyle.Top, AutoSize = true };
-        searchTop.Controls.Add(actions); searchTop.Controls.Add(filters);
+        var searchTop = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 1, RowCount = 2 };
+        searchTop.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        searchTop.RowStyles.Add(new RowStyle(SizeType.AutoSize)); searchTop.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        filters.Dock = actions.Dock = DockStyle.Fill;
+        searchTop.Controls.Add(filters, 0, 0); searchTop.Controls.Add(actions, 0, 1);
         searchPage.Controls.Add(list); searchPage.Controls.Add(basketPanel); searchPage.Controls.Add(searchTop);
         directoryPage.Controls.Add(directoryExport);
         pages.TabPages.AddRange([searchPage, directoryPage]);
         pages.SelectedIndexChanged += (_, _) =>
         {
             if (pages.SelectedTab == directoryPage && !directoryExport.IsBusy) directoryExport.SetCatalog(store);
+            UpdatePreview();
         };
+        directoryExport.PreviewSelectionChanged += _ => UpdatePreview();
+        foreach (var control in new Control[] { root, cab, game })
+            control.TextChanged += (_, _) => { assetPreview.Reset(); UpdatePreview(); };
         directoryExport.StatusChanged += Status;
         directoryExport.ErrorOccurred += Error;
         directoryExport.BusyChanged += _ => { UpdateBusyControls(); SaveSettings(); };
         var top = new Panel { Dock = DockStyle.Top, AutoSize = true };
         top.Controls.Add(config); top.Controls.Add(header);
         loadingPanel.Controls.Add(loadingLabel); loadingPanel.Controls.Add(loadingProgress);
-        Controls.Add(pages); Controls.Add(status); Controls.Add(loadingPanel); Controls.Add(top);
+        var body = new SplitContainer { Dock = DockStyle.Fill, Width = 1250, SplitterDistance = 940,
+            FixedPanel = FixedPanel.Panel2, Panel1MinSize = 680, Panel2MinSize = 280, Name = "previewSplit" };
+        body.Panel1.Controls.Add(pages); body.Panel2.Controls.Add(assetPreview);
+        Controls.Add(body); Controls.Add(status); Controls.Add(loadingPanel); Controls.Add(top);
         busyControls.AddRange([game, full, search, type, block, regex, list, basketView]);
     }
 
@@ -188,6 +204,7 @@ public sealed class ExplorerForm : Form
         if (!busy && directoryExport.IsBusy)
             foreach (var control in new Control[] { search, type, block, regex, list }) control.Enabled = true;
         directoryExport.SetAvailable(!busy);
+        assetPreview.SetAvailable(!busy && !directoryExport.IsBusy);
         stop.Enabled = busy || directoryExport.IsBusy;
     }
 
@@ -246,7 +263,7 @@ public sealed class ExplorerForm : Form
                 await Task.Run(() => loaded.ApplyPathDict(paths), token);
                 token.ThrowIfCancellationRequested();
                 Status("正在准备资源列表…");
-                store = loaded; view = []; list.VirtualListSize = 0;
+                assetPreview.Reset(); store = loaded; view = []; list.VirtualListSize = 0;
                 directoryExport.SetCatalog(store);
                 basket.Clear(); RefreshBasket();
                 type.Items.Clear(); type.Items.AddRange(store.AllTypes); type.SelectedIndex = 0;
@@ -334,6 +351,18 @@ public sealed class ExplorerForm : Form
         if (loaded) DialogResult = DialogResult.OK;
     }
     private CatalogAsset[] Selected() => store == null ? [] : list.SelectedIndices.Cast<int>().Where(i => i < view.Length).Select(i => store.Entry(view[i])).ToArray();
+    private void UpdatePreview()
+    {
+        if (IsDisposed || !Enum.TryParse<GameType>(game.Text, out var selectedGame)) return;
+        CatalogAsset asset = null;
+        if (pages.SelectedTab == directoryPage) asset = directoryExport.PreviewAsset;
+        else if (store != null && list.SelectedIndices.Count > 0)
+        {
+            var index = list.FocusedItem is { Selected: true } focused ? focused.Index : list.SelectedIndices[0];
+            if (index >= 0 && index < view.Length) asset = store.Entry(view[index]);
+        }
+        assetPreview.SelectAsset(asset == null ? null : new(selectedGame, [asset], cab.Text, root.Text));
+    }
     private void OpenDirectoryExport()
     {
         if (busy) return;

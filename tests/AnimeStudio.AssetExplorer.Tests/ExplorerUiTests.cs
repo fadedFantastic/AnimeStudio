@@ -6,6 +6,124 @@ using AnimeStudio.AssetExplorer;
 
 internal static class ExplorerUiTests
 {
+    public static void RunPreview(string output, CatalogAsset texture, CatalogAsset textAsset, Action<bool, string> check)
+    {
+        Exception failure = null;
+        var thread = new Thread(() =>
+        {
+            Application.EnableVisualStyles();
+            using var timer = new System.Windows.Forms.Timer { Interval = 1 };
+            timer.Tick += (_, _) =>
+            {
+                timer.Stop();
+                try
+                {
+                    var builder = new AssetIndexStore.Builder(); builder.Add(texture); builder.Add(textAsset);
+                    builder.Add(texture with { Name = "Slow", PathID = 10, Container = "Assets/Preview/Slow.png" });
+                    builder.Add(texture with { Name = "Model", PathID = 11, Type = ClassIDType.Mesh, Container = "Assets/Preview/Model.mesh" });
+                    var path = Path.Combine(output, "preview-ui.aex"); builder.Build(GameType.Normal, "fixture").Save(path, default);
+                    var bridge = new PreviewTestBridge(File.ReadAllBytes(Path.Combine(output, "texture.png")));
+                    using var form = new ExplorerForm(bridge, false, new ExplorerSettings { WorkDirectory = output }, _ => { }, ex => throw ex) { Opacity = 0, ShowInTaskbar = false };
+                    form.Show(); Complete(form.OpenAsync(path));
+                    var list = (ListView)form.Controls.Find("searchResults", true).Single();
+                    var pages = (TabControl)form.Controls.Find("explorerPages", true).Single();
+                    var picture = (PictureBox)form.Controls.Find("previewImage", true).Single();
+                    var text = (TextBox)form.Controls.Find("previewText", true).Single();
+                    var info = (Label)form.Controls.Find("previewInfo", true).Single();
+                    var auto = (CheckBox)form.Controls.Find("autoPreview", true).Single();
+                    var directory = Descendants(form).OfType<DirectoryExportControl>().Single();
+                    void Select(int index) { list.SelectedIndices.Clear(); list.Items[index].Selected = true; list.Items[index].Focused = true; }
+                    Select(0); PumpUntil(() => picture.Image != null);
+                    check(picture.Visible && bridge.Calls == 1, "search selection displays an image without Load Selected");
+                    list.SelectedIndices.Clear(); Select(0); PumpUntil(() => picture.Image != null);
+                    check(bridge.Calls == 1, "repeat image selection uses bounded thumbnail cache");
+                    pages.SelectedIndex = 1; directory.SelectDirectory("Assets/Preview"); Complete(directory.CollectAsync());
+                    var rows = (ListView)form.Controls.Find("resourcePreview", true).Single();
+                    var imageIndex = Enumerable.Range(0, rows.VirtualListSize).Single(i => rows.Items[i].Text == "Texture.png");
+                    rows.Items[imageIndex].Selected = true; PumpUntil(() => picture.Image != null);
+                    check(bridge.Calls == 1 && picture.Visible, "directory selection shares the image preview and cache");
+                    var types = (CheckedListBox)form.Controls.Find("fileTypes", true).Single();
+                    for (var i = 0; i < types.Items.Count; i++) types.SetItemChecked(i, false);
+                    Application.DoEvents();
+                    check(picture.Image != null && rows.SelectedIndices.Count == 1 && bridge.Calls == 1,
+                        "changing export checkboxes preserves the current resource preview");
+                    var imageRow = rows.Items[imageIndex]; var titleBounds = imageRow.Bounds;
+                    rows.GetType().GetMethod("OnMouseDown", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                        .Invoke(rows, new object[] { new MouseEventArgs(MouseButtons.Right, 1, titleBounds.Left + 15, titleBounds.Top + 5, 0) });
+                    rows.ContextMenuStrip.Items.Cast<ToolStripItem>().Single(i => i.Text == "复制资源路径").PerformClick();
+                    check(Clipboard.GetText() == texture.Container, "directory resource path right-click copies the full logical resource path");
+                    rows.ContextMenuStrip.Items.Cast<ToolStripItem>().Single(i => i.Text == "复制相对资源路径").PerformClick();
+                    check(Clipboard.GetText() == "Texture.png", "directory context menu copies a path relative to the collected root");
+                    var textIndex = Enumerable.Range(0, rows.VirtualListSize).Single(i => rows.Items[i].Text == "Text.json");
+                    var bounds = rows.Items[textIndex].Bounds;
+                    rows.GetType().GetMethod("OnMouseDown", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                        .Invoke(rows, new object[] { new MouseEventArgs(MouseButtons.Right, 1, bounds.Left + 15, bounds.Top + 5, 0) });
+                    rows.ContextMenuStrip.Items.Cast<ToolStripItem>().Single(i => i.Text == "复制资源路径").PerformClick();
+                    check(Clipboard.GetText() == textAsset.Container && rows.SelectedIndices.Count == 1,
+                        "right-clicking an unselected path acts on the clicked resource");
+                    PumpUntil(() => text.Visible && text.Text == "text-preview");
+                    Capture(form, Path.Combine(output, "directory-text-preview.png"));
+                    pages.SelectedIndex = 0;
+                    Select(2); PumpUntil(() => bridge.SlowStarted);
+                    var switchTimer = Stopwatch.StartNew(); Select(1);
+                    check(switchTimer.ElapsedMilliseconds < 100, "selecting another asset never waits for a slow decoder");
+                    PumpUntil(() => text.Visible && text.Text == "text-preview");
+                    bridge.SlowRelease.SetResult(new AssetPreviewData("stale", ImagePng: bridge.Png));
+                    PumpUntil(() => bridge.SlowReturned);
+                    check(text.Visible && picture.Image == null && text.Text == "text-preview" && bridge.SlowCancelled,
+                        "late cancelled preview cannot replace the latest selection");
+                    Select(3); var calls = bridge.Calls;
+                    using (var delay = Task.Delay(400)) Complete(delay);
+                    check(bridge.Calls == calls && !picture.Visible && info.Text.Contains("清单信息"), "model types stay metadata-only and do not load dependencies");
+                    auto.Checked = false; Select(0); Complete(Task.Delay(400));
+                    check(bridge.Calls == calls && picture.Image == null, "automatic preview can be disabled without loading");
+                    auto.Checked = true; PumpUntil(() => picture.Image != null);
+                    Capture(form, Path.Combine(output, "search-image-preview.png"));
+                    form.Size = form.MinimumSize; Capture(form, Path.Combine(output, "preview-minimum.png"));
+                    check(picture.Width >= 200 && list.Height >= 100 && list.Width >= 640, "preview and result list remain usable at minimum size");
+                    var loadButton = Descendants(form).OfType<Button>().Single(b => b.Text == "Load Selected");
+                    check(loadButton.Parent.Controls.OfType<Button>().All(b => b.RectangleToScreen(b.ClientRectangle).Bottom <= list.RectangleToScreen(list.ClientRectangle).Top),
+                        "wrapped search actions stay fully above the result list at minimum size");
+                    bridge.Hold = true; Select(2); PumpUntil(() => bridge.Held);
+                    var close = Stopwatch.StartNew(); form.Close();
+                    check(form.IsDisposed && close.ElapsedMilliseconds < 1000, "closing never waits for pending preview work");
+                    bridge.HoldRelease.SetResult(new AssetPreviewData("late")); Complete(Task.Delay(50));
+                }
+                catch (Exception ex) { failure = ex; }
+                finally { Application.ExitThread(); }
+            };
+            timer.Start(); Application.Run();
+        });
+        thread.SetApartmentState(ApartmentState.STA); thread.Start(); thread.Join();
+        if (failure != null) throw failure;
+    }
+
+    private sealed class PreviewTestBridge(byte[] png) : IStudioBridge
+    {
+        public byte[] Png = png;
+        public int Calls;
+        public volatile bool SlowStarted, SlowCancelled, SlowReturned, Hold, Held;
+        public TaskCompletionSource<AssetPreviewData> SlowRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<AssetPreviewData> HoldRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public async Task<AssetPreviewData> PreviewAsync(CatalogRequest request, CancellationToken token)
+        {
+            Interlocked.Increment(ref Calls);
+            var asset = request.Assets.Single();
+            if (asset.Name == "Slow")
+            {
+                if (Hold) { Held = true; return await HoldRelease.Task; }
+                using var cancel = token.Register(() => SlowCancelled = true);
+                SlowStarted = true; var result = await SlowRelease.Task; SlowReturned = true; return result;
+            }
+            return asset.Type == ClassIDType.TextAsset ? new("text", "text-preview") : new("192 × 128", ImagePng: Png);
+        }
+        public Task LoadAsync(CatalogRequest request, CancellationToken token) => Task.CompletedTask;
+        public Task<string> ExportAssetsAsync(CatalogRequest request, string folder, CancellationToken token) => Task.FromResult("");
+        public Task<string> ExportModelsAsync(CatalogRequest request, string folder, CancellationToken token) => Task.FromResult("");
+        public Task<DirectoryExportResult> ExportDirectoryAsync(DirectoryExportPlan plan, CatalogRequest context, string folder, Action<string> report, CancellationToken token)
+            => Task.FromResult(new DirectoryExportResult(folder, 0, 0, plan.Groups.Length, false));
+    }
+
     public static void RunClosePerformance(Action<bool, string> check)
     {
         Exception failure = null;

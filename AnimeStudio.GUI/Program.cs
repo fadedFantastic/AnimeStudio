@@ -14,6 +14,7 @@ namespace AnimeStudio.GUI
         [STAThread]
         static void Main(string[] args)
         {
+            if (AssetPreviewWorker.TryRun(args)) return;
             if (DirectoryExportWorker.TryRun(args)) return;
             if (AnimeStudio.AssetExplorer.IndexWorker.TryRun(args)) return;
             Application.SetHighDpiMode(HighDpiMode.SystemAware);

@@ -16,7 +16,7 @@ internal sealed class DirectoryExportControl : UserControl
     private readonly Label summary = new() { Dock = DockStyle.Top, Height = 82, Padding = new Padding(8), Text = "输入资源根目录并点击“列出目录”，然后勾选子目录和文件类型。" };
     private readonly TreeView folders = new() { Dock = DockStyle.Fill, CheckBoxes = true, HideSelection = false, Name = "directoryTree" };
     private readonly CheckedListBox types = new() { Dock = DockStyle.Fill, CheckOnClick = true, IntegralHeight = false, Name = "fileTypes" };
-    private readonly ListView preview = new() { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, VirtualMode = true, Name = "resourcePreview" };
+    private readonly ListView preview = new() { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, HideSelection = false, VirtualMode = true, Name = "resourcePreview" };
     private DirectoryExportPlan collected, selected;
     private PrimaryAssetGroup[] visible = [];
     private string visibleRoot = "";
@@ -28,6 +28,16 @@ internal sealed class DirectoryExportControl : UserControl
     public event Action<bool> BusyChanged;
     public event Action<string> StatusChanged;
     public event Action<Exception> ErrorOccurred;
+    public event Action<CatalogAsset> PreviewSelectionChanged;
+    public CatalogAsset PreviewAsset
+    {
+        get
+        {
+            if (preview.SelectedIndices.Count == 0) return null;
+            var index = preview.FocusedItem is { Selected: true } focused ? focused.Index : preview.SelectedIndices[0];
+            return index >= 0 && index < visible.Length ? AssetPreview.Representative(visible[index]) : null;
+        }
+    }
     public int ExportWorkers => (int)workers.Value;
     public string ResourceDirectory => directory.Text;
     public string ExportDirectory { get; private set; }
@@ -42,11 +52,12 @@ internal sealed class DirectoryExportControl : UserControl
         this.bridge = bridge; this.getContext = getContext; ExportDirectory = exportDirectory;
         Dock = DockStyle.Fill; Size = new Size(1200, 600); AutoScaleMode = AutoScaleMode.Dpi;
         directory.Text = initialDirectory; workers.Value = Math.Clamp(exportWorkers, 1, 8);
-        var pathBar = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
-        pathBar.Controls.AddRange([directory, collect]);
+        var pathBar = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8), ColumnCount = 2 };
+        pathBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); pathBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        directory.Dock = DockStyle.Fill; pathBar.Controls.Add(directory, 0, 0); pathBar.Controls.Add(collect, 1, 0);
         var actions = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(8) };
         actions.Controls.AddRange([export, open, log, new Label { Text = "并发数", AutoSize = true, Padding = new Padding(8) }, workers]);
-        var content = new SplitContainer { Dock = DockStyle.Fill, Width = 1200, SplitterDistance = 340, Panel1MinSize = 260, Panel2MinSize = 500 };
+        var content = new SplitContainer { Dock = DockStyle.Fill, Width = 1200, SplitterDistance = 260, Panel1MinSize = 220, Panel2MinSize = 420 };
         var filters = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
         filters.RowStyles.Add(new RowStyle(SizeType.Percent, 62)); filters.RowStyles.Add(new RowStyle(SizeType.Percent, 38));
         var directoryGroup = FilterGroup("子目录（勾选父目录同步子目录）", folders, value =>
@@ -55,7 +66,7 @@ internal sealed class DirectoryExportControl : UserControl
         { for (var i = 0; i < types.Items.Count; i++) types.SetItemChecked(i, value); });
         filters.Controls.Add(directoryGroup, 0, 0); filters.Controls.Add(typeGroup, 0, 1);
         content.Panel1.Controls.Add(filters); content.Panel2.Controls.Add(preview); content.Panel2.Controls.Add(summary);
-        preview.Columns.Add("相对资源路径", 590); preview.Columns.Add("处理方式", 165); preview.Columns.Add("对象数", 75);
+        preview.Columns.Add("相对资源路径", 390); preview.Columns.Add("处理方式", 165); preview.Columns.Add("对象数", 75);
         preview.RetrieveVirtualItem += (_, e) =>
         {
             if (e.ItemIndex >= visible.Length) { e.Item = new ListViewItem(""); return; }
@@ -63,6 +74,30 @@ internal sealed class DirectoryExportControl : UserControl
             e.Item = new ListViewItem([group.ResourcePath[(visibleRoot.Length + 1)..], group.IsFbx ? "FBX（含子动画）" :
                 group.IsCompiledController ? "Unity 可编辑状态机（保留编译数据）" : "按可用格式导出", group.Members.Length.ToString()]);
         };
+        preview.SelectedIndexChanged += (_, _) => PreviewSelectionChanged?.Invoke(PreviewAsset);
+        preview.MouseUp += (_, _) => PreviewSelectionChanged?.Invoke(PreviewAsset);
+        preview.KeyUp += (_, _) => PreviewSelectionChanged?.Invoke(PreviewAsset);
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("复制资源路径", null, (_, _) => CopyGroups(g => g.ResourcePath));
+        menu.Items.Add("复制相对资源路径", null, (_, _) => CopyGroups(g => g.ResourcePath[(collected.Directory.Length + 1)..]));
+        menu.Items.Add("复制 blk 完整路径", null, (_, _) => CopyGroups(g => string.Join(Environment.NewLine, g.Members.Select(a => a.Source).Distinct(StringComparer.OrdinalIgnoreCase))));
+        menu.Items.Add("定位所在资源目录", null, (_, _) =>
+        {
+            var path = ResourcePaths.Parent(SelectedGroups().FirstOrDefault()?.ResourcePath);
+            var node = Nodes(folders.Nodes).FirstOrDefault(n => string.Equals(n.Tag as string, path, StringComparison.OrdinalIgnoreCase));
+            if (node != null) { folders.SelectedNode = node; node.EnsureVisible(); }
+        });
+        menu.Opening += (_, e) => e.Cancel = preview.SelectedIndices.Count == 0;
+        preview.MouseDown += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Right) return;
+            var hit = preview.HitTest(e.Location).Item;
+            if (hit == null) { preview.SelectedIndices.Clear(); return; }
+            if (!hit.Selected) { preview.SelectedIndices.Clear(); hit.Selected = true; }
+            hit.Focused = true;
+            PreviewSelectionChanged?.Invoke(PreviewAsset);
+        };
+        preview.ContextMenuStrip = menu;
         Controls.Add(content); Controls.Add(actions); Controls.Add(pathBar);
         collect.Click += async (_, _) => await CollectAsync();
         export.Click += async (_, _) => await ExportAsync();
@@ -156,6 +191,7 @@ internal sealed class DirectoryExportControl : UserControl
         try { preview.VirtualListSize = 0; collected = selected = null; visible = []; visibleRoot = ""; folders.Nodes.Clear(); types.Items.Clear(); }
         finally { updatingChecks = false; }
         summary.Text = "根目录已变化，请重新列出目录。";
+        PreviewSelectionChanged?.Invoke(null);
     }
 
     private void PopulateFilters()
@@ -195,9 +231,11 @@ internal sealed class DirectoryExportControl : UserControl
         selected = collected.Select(Nodes(folders.Nodes).Where(n => n.Checked).Select(n => (string)n.Tag),
             types.CheckedItems.Cast<FileTypeChoice>().Select(t => t.Extension));
         var scope = folders.SelectedNode?.Tag as string ?? collected.Directory;
-        visibleRoot = scope;
-        visible = collected.Within(scope);
-        preview.VirtualListSize = visible.Length; preview.Invalidate();
+        if (!string.Equals(visibleRoot, scope, StringComparison.OrdinalIgnoreCase))
+        {
+            preview.VirtualListSize = 0; visibleRoot = scope; visible = collected.Within(scope);
+            preview.VirtualListSize = visible.Length; preview.Invalidate(); PreviewSelectionChanged?.Invoke(null);
+        }
         var scopeLabel = string.Equals(scope, collected.Directory, StringComparison.OrdinalIgnoreCase) ? "整个搜索目录" : scope[(collected.Directory.Length + 1)..];
         summary.Text = $"预览范围：{scopeLabel} · 当前目录 {visible.Length:N0} 个主资源" +
             $"\n已选 {selected.Groups.Length:N0} / {collected.Groups.Length:N0} 个主资源 · {selected.Groups.Sum(g => g.Members.Length):N0} 个对象" +
@@ -223,6 +261,7 @@ internal sealed class DirectoryExportControl : UserControl
             Status("正在读取根目录下的资源与子目录…");
             var result = await Task.Run(() => store.CollectDirectory(path, true, token), token);
             token.ThrowIfCancellationRequested();
+            preview.VirtualListSize = 0; visibleRoot = ""; visible = [];
             collected = result; PopulateFilters();
             Status(result.Groups.Length == 0 ? "没有匹配项，请确认清单中的真实资源路径。" : "勾选子目录和文件类型后导出；已有文件及不支持的复合资源会跳过并记入日志。");
         });
@@ -261,5 +300,12 @@ internal sealed class DirectoryExportControl : UserControl
         if (IsDisposed || !IsHandleCreated) return;
         if (InvokeRequired) { BeginInvoke(() => Status(message)); return; }
         StatusChanged?.Invoke(message);
+    }
+
+    private PrimaryAssetGroup[] SelectedGroups() => preview.SelectedIndices.Cast<int>().Where(i => i >= 0 && i < visible.Length).Select(i => visible[i]).ToArray();
+    private void CopyGroups(Func<PrimaryAssetGroup, string> get)
+    {
+        var value = string.Join(Environment.NewLine, SelectedGroups().Select(get));
+        if (value.Length > 0) Clipboard.SetText(value);
     }
 }

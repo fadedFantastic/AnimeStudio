@@ -32,6 +32,8 @@ public sealed record CatalogRequest(GameType Game, CatalogAsset[] Assets, string
 
 public interface IStudioBridge
 {
+    Task<AssetPreviewData> PreviewAsync(CatalogRequest request, CancellationToken token)
+        => Task.FromResult(new AssetPreviewData("当前 Studio 连接不支持预览。"));
     Task LoadAsync(CatalogRequest request, CancellationToken token);
     Task<string> ExportAssetsAsync(CatalogRequest request, string folder, CancellationToken token);
     Task<string> ExportModelsAsync(CatalogRequest request, string folder, CancellationToken token);

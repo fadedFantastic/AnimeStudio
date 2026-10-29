@@ -16,6 +16,7 @@ namespace AnimeStudio
         public bool Silent = false;
         public bool SkipProcess = false;
         public bool ResolveDependencies = false;
+        public bool SearchResourceFilesRecursively = true;
         public string SpecifyUnityVersion;
         /// <summary>
         /// Invoked after each bundle/CAB group is loaded from a multi-bundle block.

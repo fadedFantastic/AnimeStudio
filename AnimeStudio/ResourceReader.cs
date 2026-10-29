@@ -41,7 +41,7 @@ namespace AnimeStudio
                 }
                 var assetsFileDirectory = Path.GetDirectoryName(assetsFile.fullName);
                 var resourceFilePath = Path.Combine(assetsFileDirectory, resourceFileName);
-                if (!File.Exists(resourceFilePath))
+                if (!File.Exists(resourceFilePath) && assetsFile.assetsManager.SearchResourceFilesRecursively)
                 {
                     var findFiles = Directory.GetFiles(assetsFileDirectory, resourceFileName, SearchOption.AllDirectories);
                     if (findFiles.Length > 0)

@@ -11,6 +11,18 @@ var output = Path.GetFullPath(args.Length > 1 ? args[1] : "asset-explorer-test-o
 Directory.CreateDirectory(output);
 void Check(bool value, string message) { if (!value) throw new Exception(message); Console.WriteLine("PASS " + message); }
 
+if (args.FirstOrDefault() == "--preview-tests")
+{
+    AssetPreviewTests.Run(output, args.ElementAtOrDefault(2), Check);
+    return;
+}
+
+if (args.FirstOrDefault() == "--preview-real")
+{
+    AssetPreviewTests.RunReal(output, args[2], args[3], args[4], args[5], Check);
+    return;
+}
+
 if (args.FirstOrDefault() == "--optimize-fbx")
 {
     var target = Path.Combine(output, Path.GetFileName(args[2]));

@@ -22,12 +22,17 @@ partial class MainForm
 
     internal void OpenAssetExplorer()
     {
-        using var explorer = new ExplorerForm(new ExplorerBridge(this));
+        using var bridge = new ExplorerBridge(this);
+        using var explorer = new ExplorerForm(bridge);
         explorer.ShowDialog(this);
     }
 
-    internal sealed class ExplorerBridge(MainForm form) : IStudioBridge
+    internal sealed class ExplorerBridge(MainForm form) : IStudioBridge, IDisposable
     {
+        private readonly AssetPreviewWorker.Client preview = new(form.specifyUnityVersion.Text);
+        public Task<AssetPreviewData> PreviewAsync(CatalogRequest request, CancellationToken token) => preview.ReadAsync(request, token);
+        public void Dispose() => preview.Dispose();
+
         private async Task<LoadPlan> Load(CatalogRequest request, bool requireDependencies, CancellationToken token)
         {
             if (requireDependencies && string.IsNullOrWhiteSpace(request.CabMap))
